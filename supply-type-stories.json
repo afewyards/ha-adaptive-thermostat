@@ -1,0 +1,174 @@
+[
+  {
+    "id": "1.1",
+    "category": "infrastructure",
+    "description": "Add SUPPLY_TYPE_CHARACTERISTICS lookup table to const.py",
+    "steps": [
+      "Add CONF_SUPPLY_TYPE = 'supply_type' constant",
+      "Add CONF_SOURCE_MIN_ON_TIME = 'source_min_on_time' constant",
+      "Add CONF_SOURCE_MIN_OFF_TIME = 'source_min_off_time' constant",
+      "Add DEFAULT_SOURCE_MIN_ON_TIME = 0 constant",
+      "Add DEFAULT_SOURCE_MIN_OFF_TIME = 0 constant",
+      "Add SUPPLY_TYPES list: ['heatpump', 'district', 'gas_boiler', 'oil_boiler', 'electric_boiler', 'pellet_boiler']",
+      "Add SUPPLY_TYPE_CHARACTERISTICS dict with startup_delay, min_on, min_off for each type",
+      "Values: heatpump(45, 600, 300), district(5, 0, 0), gas_boiler(60, 180, 120), oil_boiler(90, 300, 180), electric_boiler(5, 0, 0), pellet_boiler(600, 1800, 600)",
+      "Add UNSAFE_OVERRIDE_THRESHOLDS dict defining min safe values per supply type",
+      "VERIFY: python -c \"from custom_components.adaptive_thermostat.const import SUPPLY_TYPE_CHARACTERISTICS; print(SUPPLY_TYPE_CHARACTERISTICS)\" succeeds"
+    ],
+    "passes": false
+  },
+  {
+    "id": "1.2",
+    "category": "config",
+    "description": "Add supply_type to domain-level config schema in __init__.py",
+    "steps": [
+      "Import CONF_SUPPLY_TYPE, SUPPLY_TYPES, SUPPLY_TYPE_CHARACTERISTICS, CONF_SOURCE_MIN_ON_TIME, CONF_SOURCE_MIN_OFF_TIME from const",
+      "Add vol.Optional(CONF_SUPPLY_TYPE): vol.In(SUPPLY_TYPES) to CONFIG_SCHEMA",
+      "Add vol.Optional(CONF_SOURCE_MIN_ON_TIME) with vol.Coerce(int), vol.Range(min=0)",
+      "Add vol.Optional(CONF_SOURCE_MIN_OFF_TIME) with vol.Coerce(int), vol.Range(min=0)",
+      "In async_setup(), extract supply_type from config",
+      "Resolve effective values: use explicit overrides if set, else derive from supply_type, else use defaults",
+      "Add warning log if override is below UNSAFE_OVERRIDE_THRESHOLDS for the supply_type",
+      "Store resolved values in hass.data[DOMAIN]: source_min_on_time, source_min_off_time",
+      "Pass resolved min_on_time, min_off_time to CentralController constructor",
+      "VERIFY: Load config with supply_type: heatpump, check HA logs show no errors"
+    ],
+    "passes": false
+  },
+  {
+    "id": "2.1",
+    "category": "feature",
+    "description": "Add min_on_time and min_off_time parameters to CentralController",
+    "steps": [
+      "Add min_on_time: int and min_off_time: int to __init__ parameters (default 0)",
+      "Store as self.min_on_time and self.min_off_time instance variables",
+      "Add self._heater_last_on: datetime | None = None to track when heater turned on",
+      "Add self._heater_last_off: datetime | None = None to track when heater turned off",
+      "Add self._cooler_last_on: datetime | None = None for cooler",
+      "Add self._cooler_last_off: datetime | None = None for cooler",
+      "Add self._pending_heater_off: bool = False for queued turn-off during min_on",
+      "Add self._pending_heater_on: bool = False for queued turn-on during min_off",
+      "VERIFY: CentralController instantiates with new parameters without error"
+    ],
+    "passes": false
+  },
+  {
+    "id": "2.2",
+    "category": "feature",
+    "description": "Implement min_on_time enforcement in CentralController",
+    "steps": [
+      "In _turn_on_switches() for heater: set self._heater_last_on = utcnow()",
+      "In _update_heater() when demand=False and heater is on:",
+      "  Calculate elapsed = (utcnow() - self._heater_last_on).total_seconds()",
+      "  If elapsed < min_on_time: set _pending_heater_off = True, schedule delayed check",
+      "  Else: proceed with turn-off",
+      "Create _schedule_min_on_check() method that waits remaining time then re-evaluates demand",
+      "When scheduled check fires: if demand still False, turn off heater",
+      "Remove or subsume TURN_OFF_DEBOUNCE_SECONDS (min_on replaces anti-flicker purpose)",
+      "Update _heater_last_off when heater actually turns off",
+      "VERIFY: Unit test confirms heater stays on for min_on_time even when demand drops"
+    ],
+    "passes": false
+  },
+  {
+    "id": "2.3",
+    "category": "feature",
+    "description": "Implement min_off_time enforcement in CentralController",
+    "steps": [
+      "In _update_heater() when demand=True and heater is off:",
+      "  If _heater_last_off is set, calculate elapsed since last off",
+      "  If elapsed < min_off_time: set _pending_heater_on = True, schedule delayed startup",
+      "  Else: proceed with normal startup (respecting startup_delay)",
+      "Create _schedule_min_off_check() method that waits remaining time then re-evaluates",
+      "Ensure startup_delay and min_off interact correctly: wait max(startup_delay, min_off_remaining)",
+      "When scheduled check fires: if demand still True, proceed with turn-on",
+      "Clear _pending_heater_on when heater actually turns on",
+      "VERIFY: Unit test confirms heater waits min_off_time before restarting"
+    ],
+    "passes": false
+  },
+  {
+    "id": "2.4",
+    "category": "feature",
+    "description": "Apply same min on/off logic to cooler in CentralController",
+    "steps": [
+      "Mirror _update_heater() min_on/min_off logic in _update_cooler()",
+      "Use _cooler_last_on, _cooler_last_off timestamps",
+      "Add _pending_cooler_on, _pending_cooler_off flags",
+      "Create _schedule_cooler_min_on_check() and _schedule_cooler_min_off_check()",
+      "Ensure shared switches handled correctly (already in codebase)",
+      "VERIFY: Unit test confirms cooler respects min_on and min_off times"
+    ],
+    "passes": false
+  },
+  {
+    "id": "3.1",
+    "category": "test",
+    "description": "Add tests for supply_type config loading",
+    "steps": [
+      "Create test_supply_type_derives_defaults() - verify heatpump sets startup=45, min_on=600, min_off=300",
+      "Create test_supply_type_explicit_override() - verify explicit values override supply_type defaults",
+      "Create test_supply_type_unsafe_override_warns() - verify warning logged when min_on < threshold",
+      "Create test_supply_type_unknown_rejected() - verify invalid supply_type fails validation",
+      "Create test_no_supply_type_uses_defaults() - verify defaults when supply_type omitted",
+      "VERIFY: pytest tests/test_central_controller.py -k supply_type passes"
+    ],
+    "passes": false
+  },
+  {
+    "id": "3.2",
+    "category": "test",
+    "description": "Add tests for min_on_time enforcement",
+    "steps": [
+      "Create test_min_on_time_prevents_early_turnoff() - demand drops, heater stays on until min_on",
+      "Create test_min_on_time_zero_allows_immediate_turnoff() - no delay when min_on=0",
+      "Create test_heater_turns_off_after_min_on_satisfied() - verify eventual turn-off",
+      "Create test_demand_returns_during_min_on_wait() - demand returns, pending turn-off cancelled",
+      "Create test_min_on_replaces_debounce() - verify old debounce behavior subsumed",
+      "VERIFY: pytest tests/test_central_controller.py -k min_on passes"
+    ],
+    "passes": false
+  },
+  {
+    "id": "3.3",
+    "category": "test",
+    "description": "Add tests for min_off_time enforcement",
+    "steps": [
+      "Create test_min_off_time_prevents_early_turnon() - demand arrives, waits min_off before starting",
+      "Create test_min_off_time_zero_allows_immediate_turnon() - no extra delay when min_off=0",
+      "Create test_min_off_interacts_with_startup_delay() - verify max(startup_delay, min_off_remaining)",
+      "Create test_demand_drops_during_min_off_wait() - demand drops, pending turn-on cancelled",
+      "Create test_heater_starts_after_min_off_satisfied() - verify eventual turn-on",
+      "VERIFY: pytest tests/test_central_controller.py -k min_off passes"
+    ],
+    "passes": false
+  },
+  {
+    "id": "3.4",
+    "category": "test",
+    "description": "Add integration test for full supply_type behavior",
+    "steps": [
+      "Create test_heatpump_full_cycle() simulating realistic demand pattern",
+      "Verify startup delay of 45s applied on first demand",
+      "Verify heater stays on for 10 min minimum despite demand fluctuations",
+      "Verify heater waits 5 min minimum before restarting after turn-off",
+      "Test rapid demand toggling does not cause short-cycling",
+      "VERIFY: pytest tests/test_central_controller.py::test_heatpump_full_cycle passes"
+    ],
+    "passes": false
+  },
+  {
+    "id": "4.1",
+    "category": "docs",
+    "description": "Update CLAUDE.md with supply_type documentation",
+    "steps": [
+      "Add supply_type to domain-level configuration section",
+      "Document all supply types and their default characteristics",
+      "Document override parameters: source_min_on_time, source_min_off_time",
+      "Add note about unsafe override warnings",
+      "Update architecture diagram if needed",
+      "VERIFY: CLAUDE.md contains supply_type documentation"
+    ],
+    "passes": false
+  }
+]

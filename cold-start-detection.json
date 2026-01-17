@@ -1,0 +1,245 @@
+[
+  {
+    "id": "1.1",
+    "category": "infrastructure",
+    "description": "Add cold-start threshold constants to const.py",
+    "steps": [
+      "Add COLD_START_IDLE_THRESHOLDS dict mapping heating types to base hours: floor_hydronic=6.0, radiator=2.5, convector=1.5, forced_air=0.75",
+      "Add DEFAULT_COLD_START_IDLE_THRESHOLD = 2.0 for unknown heating types",
+      "Add COLD_START_OUTDOOR_MULTIPLIERS list: [(15.0, 1.5), (5.0, 1.0), (-5.0, 0.7), (None, 0.5)]",
+      "VERIFY: grep COLD_START const.py shows all three constants defined"
+    ],
+    "passes": false
+  },
+  {
+    "id": "1.2",
+    "category": "infrastructure",
+    "description": "Implement get_cold_start_threshold() function in const.py",
+    "steps": [
+      "Add function get_cold_start_threshold(heating_type: str | None, outdoor_temp: float | None = None) -> float",
+      "Look up base threshold from COLD_START_IDLE_THRESHOLDS, default to DEFAULT_COLD_START_IDLE_THRESHOLD",
+      "If outdoor_temp provided, find matching multiplier from COLD_START_OUTDOOR_MULTIPLIERS (iterate until temp > threshold or None)",
+      "Return base_threshold * multiplier",
+      "Add docstring explaining threshold adjustment logic",
+      "VERIFY: python -c 'from custom_components.adaptive_thermostat.const import get_cold_start_threshold; print(get_cold_start_threshold(\"floor_hydronic\", -10))' returns 3.0"
+    ],
+    "passes": false
+  },
+  {
+    "id": "2.1",
+    "category": "infrastructure",
+    "description": "Add is_cold_start and idle_duration_hours fields to CycleMetrics",
+    "steps": [
+      "In adaptive/cycle_analysis.py, add is_cold_start: bool = False parameter to CycleMetrics.__init__ (after outdoor_temp_avg)",
+      "Add idle_duration_hours: float | None = None parameter after is_cold_start",
+      "Assign self.is_cold_start = is_cold_start in __init__ body",
+      "Assign self.idle_duration_hours = idle_duration_hours in __init__ body",
+      "VERIFY: python -c 'from custom_components.adaptive_thermostat.adaptive.cycle_analysis import CycleMetrics; m = CycleMetrics(is_cold_start=True, idle_duration_hours=5.0); print(m.is_cold_start, m.idle_duration_hours)' prints True 5.0"
+    ],
+    "passes": false
+  },
+  {
+    "id": "3.1",
+    "category": "feature",
+    "description": "Add heating_type parameter and state variables to CycleTrackerManager",
+    "steps": [
+      "In managers/cycle_tracker.py __init__, add heating_type: str | None = None parameter after get_outdoor_temp",
+      "Add self._heating_type = heating_type assignment in __init__ body",
+      "Add self._last_cycle_end_time: datetime | None = None state variable",
+      "Add self._idle_duration_hours: float | None = None state variable",
+      "VERIFY: grep -n '_heating_type\\|_last_cycle_end_time\\|_idle_duration_hours' managers/cycle_tracker.py shows all three"
+    ],
+    "passes": false
+  },
+  {
+    "id": "3.2",
+    "category": "feature",
+    "description": "Compute idle duration in on_heating_started()",
+    "steps": [
+      "In on_heating_started(), after line 179 (self._cycle_start_time = timestamp), add idle computation",
+      "If self._last_cycle_end_time is not None: compute idle_delta = timestamp - self._last_cycle_end_time",
+      "Set self._idle_duration_hours = idle_delta.total_seconds() / 3600",
+      "Else set self._idle_duration_hours = None (first cycle)",
+      "Add debug log: self._logger.debug('Idle duration since last cycle: %.2f hours', self._idle_duration_hours) if not None",
+      "VERIFY: grep idle_duration managers/cycle_tracker.py shows computation in on_heating_started"
+    ],
+    "passes": false
+  },
+  {
+    "id": "3.3",
+    "category": "feature",
+    "description": "Record cycle end time in _reset_cycle_state()",
+    "steps": [
+      "In _reset_cycle_state(), before setting self._state = CycleState.IDLE, add:",
+      "self._last_cycle_end_time = datetime.now()",
+      "VERIFY: grep -A2 'def _reset_cycle_state' managers/cycle_tracker.py shows _last_cycle_end_time assignment"
+    ],
+    "passes": false
+  },
+  {
+    "id": "3.4",
+    "category": "feature",
+    "description": "Compute is_cold_start flag in _finalize_cycle()",
+    "steps": [
+      "In _finalize_cycle(), after validation checks (~line 620), import get_cold_start_threshold from const",
+      "Get outdoor_temp = self._get_outdoor_temp() if self._get_outdoor_temp else None",
+      "Compute threshold = get_cold_start_threshold(self._heating_type, outdoor_temp)",
+      "Set is_cold_start = False as default",
+      "If self._idle_duration_hours is not None and self._idle_duration_hours >= threshold: is_cold_start = True",
+      "Log info if cold-start: 'Cold-start cycle detected: idle %.2f hours >= threshold %.2f hours'",
+      "Pass is_cold_start=is_cold_start and idle_duration_hours=self._idle_duration_hours to CycleMetrics constructor",
+      "VERIFY: grep -B5 -A5 'is_cold_start' managers/cycle_tracker.py shows flag computation and CycleMetrics creation"
+    ],
+    "passes": false
+  },
+  {
+    "id": "3.5",
+    "category": "feature",
+    "description": "Add idle_duration_hours property and get_current_idle_hours() method",
+    "steps": [
+      "Add @property idle_duration_hours returning self._idle_duration_hours",
+      "Add method get_current_idle_hours() -> float | None",
+      "Return None if self._last_cycle_end_time is None",
+      "Return None if self._state != CycleState.IDLE (in active cycle)",
+      "Otherwise return (datetime.now() - self._last_cycle_end_time).total_seconds() / 3600",
+      "VERIFY: grep -A5 'def get_current_idle_hours' managers/cycle_tracker.py shows method"
+    ],
+    "passes": false
+  },
+  {
+    "id": "4.1",
+    "category": "feature",
+    "description": "Filter cold-start cycles in AdaptiveLearner.calculate_pid_adjustment()",
+    "steps": [
+      "In adaptive/learning.py calculate_pid_adjustment(), find existing filter at ~line 291",
+      "Change from: undisturbed_cycles = [c for c in recent_cycles if not c.is_disturbed]",
+      "To: valid_cycles = [c for c in recent_cycles if not c.is_disturbed and not c.is_cold_start]",
+      "Update variable name from undisturbed_cycles to valid_cycles in subsequent code",
+      "Add debug log counting excluded cycles: cold_start_count = sum(1 for c in recent_cycles if c.is_cold_start)",
+      "VERIFY: grep 'is_cold_start' adaptive/learning.py shows filter in calculate_pid_adjustment"
+    ],
+    "passes": false
+  },
+  {
+    "id": "5.1",
+    "category": "config",
+    "description": "Pass heating_type to CycleTrackerManager in climate.py",
+    "steps": [
+      "In climate.py at ~line 856, find CycleTrackerManager instantiation",
+      "Add heating_type=self._heating_type parameter to constructor call",
+      "VERIFY: grep -A10 'CycleTrackerManager(' climate.py shows heating_type parameter"
+    ],
+    "passes": false
+  },
+  {
+    "id": "6.1",
+    "category": "feature",
+    "description": "Expose idle_since_last_cycle_hours in state attributes",
+    "steps": [
+      "In managers/state_attributes.py, add ATTR_IDLE_HOURS = 'idle_since_last_cycle_hours' constant",
+      "In _add_learning_status_attributes(), after existing cycle_tracker attributes:",
+      "Get current_idle = cycle_tracker.get_current_idle_hours()",
+      "If current_idle is not None: attrs[ATTR_IDLE_HOURS] = round(current_idle, 2)",
+      "VERIFY: grep ATTR_IDLE_HOURS managers/state_attributes.py shows constant and usage"
+    ],
+    "passes": false
+  },
+  {
+    "id": "7.1",
+    "category": "test",
+    "description": "Create test file and test threshold lookup",
+    "steps": [
+      "Create tests/test_cold_start.py with pytest imports",
+      "Import get_cold_start_threshold, HEATING_TYPE_* constants from const",
+      "Add TestColdStartThresholds class",
+      "test_floor_hydronic_threshold: assert get_cold_start_threshold('floor_hydronic') == 6.0",
+      "test_radiator_threshold: assert get_cold_start_threshold('radiator') == 2.5",
+      "test_convector_threshold: assert get_cold_start_threshold('convector') == 1.5",
+      "test_forced_air_threshold: assert get_cold_start_threshold('forced_air') == 0.75",
+      "test_unknown_type_uses_default: assert get_cold_start_threshold(None) == 2.0",
+      "VERIFY: pytest tests/test_cold_start.py::TestColdStartThresholds -v passes"
+    ],
+    "passes": false
+  },
+  {
+    "id": "7.2",
+    "category": "test",
+    "description": "Test outdoor temperature compensation",
+    "steps": [
+      "Add TestOutdoorCompensation class to test_cold_start.py",
+      "test_warm_weather_increases_threshold: get_cold_start_threshold('floor_hydronic', 20.0) == 9.0 (6.0 * 1.5)",
+      "test_baseline_weather: get_cold_start_threshold('floor_hydronic', 10.0) == 6.0 (6.0 * 1.0)",
+      "test_cold_weather_decreases_threshold: get_cold_start_threshold('floor_hydronic', 0.0) == 4.2 (6.0 * 0.7)",
+      "test_very_cold_weather: get_cold_start_threshold('floor_hydronic', -10.0) == 3.0 (6.0 * 0.5)",
+      "test_no_outdoor_temp_uses_baseline: get_cold_start_threshold('floor_hydronic', None) == 6.0",
+      "VERIFY: pytest tests/test_cold_start.py::TestOutdoorCompensation -v passes"
+    ],
+    "passes": false
+  },
+  {
+    "id": "7.3",
+    "category": "test",
+    "description": "Test CycleMetrics cold-start fields",
+    "steps": [
+      "Add TestCycleMetricsColdStart class to test_cold_start.py",
+      "Import CycleMetrics from adaptive.cycle_analysis",
+      "test_default_not_cold_start: CycleMetrics().is_cold_start is False",
+      "test_cold_start_flag_set: CycleMetrics(is_cold_start=True).is_cold_start is True",
+      "test_idle_duration_stored: CycleMetrics(idle_duration_hours=5.5).idle_duration_hours == 5.5",
+      "VERIFY: pytest tests/test_cold_start.py::TestCycleMetricsColdStart -v passes"
+    ],
+    "passes": false
+  },
+  {
+    "id": "7.4",
+    "category": "test",
+    "description": "Test idle duration tracking in CycleTrackerManager",
+    "steps": [
+      "Add TestCycleTrackerIdleTracking class with fixtures for mock hass, learner, callbacks",
+      "test_no_idle_on_first_cycle: on_heating_started() sets idle_duration_hours to None",
+      "test_idle_duration_computed: set _last_cycle_end_time, call on_heating_started 3h later, verify idle_duration_hours == 3.0",
+      "test_cycle_end_time_recorded: call _reset_cycle_state(), verify _last_cycle_end_time is set",
+      "VERIFY: pytest tests/test_cold_start.py::TestCycleTrackerIdleTracking -v passes"
+    ],
+    "passes": false
+  },
+  {
+    "id": "7.5",
+    "category": "test",
+    "description": "Test cold-start flag computation",
+    "steps": [
+      "Add TestColdStartFlagComputation class",
+      "test_cold_start_above_threshold: idle 7h, floor_hydronic threshold 6h -> is_cold_start True",
+      "test_not_cold_start_below_threshold: idle 4h, floor_hydronic threshold 6h -> is_cold_start False",
+      "test_cold_start_with_outdoor_compensation: idle 4h, outdoor -10C, adjusted threshold 3h -> is_cold_start True",
+      "test_first_cycle_not_cold_start: no previous end time -> is_cold_start False",
+      "VERIFY: pytest tests/test_cold_start.py::TestColdStartFlagComputation -v passes"
+    ],
+    "passes": false
+  },
+  {
+    "id": "7.6",
+    "category": "test",
+    "description": "Test learning exclusion of cold-start cycles",
+    "steps": [
+      "Add TestLearningExclusion class",
+      "Import AdaptiveLearner from adaptive.learning",
+      "test_cold_start_excluded: add 6 cycles (3 normal, 3 cold-start), verify calculate_pid_adjustment uses only 3",
+      "test_insufficient_when_too_many_cold_start: add 2 normal + 4 cold-start, min_cycles=6 -> returns None",
+      "VERIFY: pytest tests/test_cold_start.py::TestLearningExclusion -v passes"
+    ],
+    "passes": false
+  },
+  {
+    "id": "8.1",
+    "category": "test",
+    "description": "Run regression tests and full test suite",
+    "steps": [
+      "Run pytest tests/test_cycle_tracker.py -v to verify no regressions",
+      "Run pytest tests/test_learning.py -v to verify no regressions",
+      "Run pytest --tb=short to verify full suite passes",
+      "VERIFY: pytest --tb=short exits with code 0"
+    ],
+    "passes": false
+  }
+]
