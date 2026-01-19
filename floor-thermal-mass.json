@@ -1,0 +1,220 @@
+[
+  {
+    "id": "1.1",
+    "category": "infrastructure",
+    "description": "Add slab type properties and config constants to const.py",
+    "steps": [
+      "Add SLAB_TAU_CONTRIBUTION dict with tau values per slab type: screed=0.08, concrete=0.10, anhydrite=0.11, dry=0.02",
+      "Add DEFAULT_SLAB_THICKNESS_MM = 65 constant",
+      "Add DEFAULT_PIPE_DEPTH_RATIO = 0.45 constant",
+      "Add SLAB_THICKNESS_MIN = 20, SLAB_THICKNESS_MAX = 150 constants",
+      "Add PIPE_DEPTH_MIN = 10, PIPE_DEPTH_MAX = 100 constants",
+      "Add CONF_FLOOR_CONSTRUCTION = 'floor_construction' constant",
+      "Add CONF_SLAB_THICKNESS_MM = 'slab_thickness_mm' constant",
+      "Add CONF_SLAB_TYPE = 'slab_type' constant",
+      "Add CONF_PIPE_DEPTH_MM = 'pipe_depth_mm' constant",
+      "Add CONF_THERMAL_MASS_FACTOR = 'thermal_mass_factor' constant",
+      "VERIFY: grep -r 'SLAB_TAU_CONTRIBUTION' custom_components/adaptive_thermostat/const.py returns the dict"
+    ],
+    "passes": false
+  },
+  {
+    "id": "2.1",
+    "category": "infrastructure",
+    "description": "Implement calculate_slab_thermal_contribution() in physics.py",
+    "steps": [
+      "Add calculate_slab_thermal_contribution(slab_type, slab_thickness_mm, pipe_depth_mm, area_m2) function to adaptive/physics.py",
+      "Import SLAB_TAU_CONTRIBUTION, DEFAULT_SLAB_THICKNESS_MM, DEFAULT_PIPE_DEPTH_RATIO from const",
+      "Return 0.0 if area_m2 is None or <= 0",
+      "Calculate: base = SLAB_TAU_CONTRIBUTION[slab_type]",
+      "Calculate: thickness_factor = slab_thickness_mm / 65.0",
+      "Calculate: depth_factor = pipe_depth_mm / 30.0",
+      "Return: base * area_m2 * thickness_factor * depth_factor (in hours)",
+      "Add docstring explaining the formula and units",
+      "VERIFY: pytest tests/test_physics.py::test_calculate_slab_thermal_contribution -v passes"
+    ],
+    "passes": false
+  },
+  {
+    "id": "2.2",
+    "category": "infrastructure",
+    "description": "Modify calculate_thermal_time_constant() to accept floor_construction",
+    "steps": [
+      "Add floor_construction: dict | None = None parameter to calculate_thermal_time_constant()",
+      "Add heating_type: str | None = None parameter",
+      "Add thermal_mass_factor: float | None = None parameter",
+      "Calculate tau_air using existing logic (volume/50 with window adjustment)",
+      "If thermal_mass_factor is set: return tau_air * thermal_mass_factor (takes precedence)",
+      "If floor_construction is set AND heating_type == 'floor_hydronic': parse slab params",
+      "Estimate pipe_depth if not specified: pipe_depth = thickness * DEFAULT_PIPE_DEPTH_RATIO",
+      "Clamp pipe_depth if > slab_thickness: pipe_depth = thickness * DEFAULT_PIPE_DEPTH_RATIO",
+      "Calculate tau_slab = calculate_slab_thermal_contribution(type, thickness, depth, area)",
+      "If floor_hydronic with no floor_construction: auto-apply default 65mm screed",
+      "Return tau_air + tau_slab for additive model",
+      "Add _LOGGER.debug() call with tau breakdown: tau_air, tau_slab, tau_total, slab_type",
+      "VERIFY: pytest tests/test_physics.py -v passes"
+    ],
+    "passes": false
+  },
+  {
+    "id": "3.1",
+    "category": "feature",
+    "description": "Add floor_construction schema to climate.py",
+    "steps": [
+      "Import CONF_FLOOR_CONSTRUCTION, CONF_SLAB_THICKNESS_MM, CONF_SLAB_TYPE, CONF_PIPE_DEPTH_MM from const",
+      "Import SLAB_TAU_CONTRIBUTION, SLAB_THICKNESS_MIN, SLAB_THICKNESS_MAX, PIPE_DEPTH_MIN, PIPE_DEPTH_MAX from const",
+      "Create FLOOR_CONSTRUCTION_SCHEMA = vol.Schema with optional keys",
+      "Add slab_thickness_mm: vol.All(vol.Coerce(int), vol.Range(min=20, max=150))",
+      "Add slab_type: vol.In(list(SLAB_TAU_CONTRIBUTION.keys()))",
+      "Add pipe_depth_mm: vol.All(vol.Coerce(int), vol.Range(min=10, max=100))",
+      "Add vol.Optional(CONF_FLOOR_CONSTRUCTION): FLOOR_CONSTRUCTION_SCHEMA to PLATFORM_SCHEMA",
+      "VERIFY: Home Assistant config validation accepts floor_construction block"
+    ],
+    "passes": false
+  },
+  {
+    "id": "3.2",
+    "category": "feature",
+    "description": "Add thermal_mass_factor config option to climate.py",
+    "steps": [
+      "Import CONF_THERMAL_MASS_FACTOR from const",
+      "Add vol.Optional(CONF_THERMAL_MASS_FACTOR): vol.All(vol.Coerce(float), vol.Range(min=0.5, max=5.0)) to PLATFORM_SCHEMA",
+      "Store thermal_mass_factor in SmartThermostat.__init__()",
+      "VERIFY: Home Assistant config validation accepts thermal_mass_factor"
+    ],
+    "passes": false
+  },
+  {
+    "id": "3.3",
+    "category": "feature",
+    "description": "Wire floor params to physics calculation in climate.py",
+    "steps": [
+      "In SmartThermostat.__init__(), extract floor_construction dict from config",
+      "Pass floor_construction, heating_type, thermal_mass_factor to calculate_thermal_time_constant()",
+      "Log warning if floor_construction specified for non-floor_hydronic heating_type",
+      "Store calculated tau components for state attributes: _tau_air, _tau_slab, _thermal_time_constant",
+      "VERIFY: Log shows tau breakdown when floor_construction is configured"
+    ],
+    "passes": false
+  },
+  {
+    "id": "3.4",
+    "category": "feature",
+    "description": "Expose thermal_model in extra_state_attributes",
+    "steps": [
+      "In extra_state_attributes property, add 'thermal_model' dict",
+      "Include: tau_air_hours, tau_slab_hours, tau_total_hours",
+      "Include: slab_type, slab_thickness_mm, pipe_depth_mm (if applicable)",
+      "Include: thermal_mass_factor (if set)",
+      "VERIFY: Entity attributes show thermal_model with tau breakdown"
+    ],
+    "passes": false
+  },
+  {
+    "id": "4.1",
+    "category": "test",
+    "description": "Add tests for calculate_slab_thermal_contribution()",
+    "steps": [
+      "Create test_calculate_slab_thermal_contribution_screed() with 65mm slab, 30mm depth, 15m² area",
+      "Assert result ≈ 0.08 * 15 * 1.0 * 1.0 = 1.2 hours",
+      "Create test_calculate_slab_thermal_contribution_concrete() with same params",
+      "Assert result ≈ 0.10 * 15 = 1.5 hours",
+      "Create test_calculate_slab_thermal_contribution_thick_slab() with 100mm slab",
+      "Assert result scales with thickness factor (100/65 ≈ 1.54x)",
+      "Create test_calculate_slab_thermal_contribution_no_area() with area_m2=None",
+      "Assert returns 0.0",
+      "VERIFY: pytest tests/test_physics.py -k slab_thermal -v passes"
+    ],
+    "passes": false
+  },
+  {
+    "id": "4.2",
+    "category": "test",
+    "description": "Add tests for floor_hydronic default behavior",
+    "steps": [
+      "Create test_thermal_time_constant_floor_hydronic_default()",
+      "Call calculate_thermal_time_constant(volume_m3=50, heating_type='floor_hydronic', floor_area_m2=20)",
+      "Assert tau_total > tau_air (slab contribution added)",
+      "Assert slab contribution ≈ 0.08 * 20 * 1.0 * 1.0 = 1.6 hours",
+      "Create test_thermal_time_constant_radiator_no_slab()",
+      "Call with heating_type='radiator', no floor_construction",
+      "Assert no slab contribution added (same as current behavior)",
+      "VERIFY: pytest tests/test_physics.py -k floor_hydronic -v passes"
+    ],
+    "passes": false
+  },
+  {
+    "id": "4.3",
+    "category": "test",
+    "description": "Add tests for explicit floor_construction override",
+    "steps": [
+      "Create test_thermal_time_constant_explicit_floor_construction()",
+      "Pass floor_construction={'slab_type': 'anhydrite', 'slab_thickness_mm': 80, 'pipe_depth_mm': 35}",
+      "Assert tau_slab uses anhydrite contribution (0.11) with scaling factors",
+      "Create test_thermal_time_constant_pipe_depth_estimated()",
+      "Pass floor_construction with only slab_thickness_mm",
+      "Assert pipe_depth estimated as thickness * 0.45",
+      "VERIFY: pytest tests/test_physics.py -k explicit -v passes"
+    ],
+    "passes": false
+  },
+  {
+    "id": "4.4",
+    "category": "test",
+    "description": "Add tests for thermal_mass_factor precedence",
+    "steps": [
+      "Create test_thermal_mass_factor_takes_precedence()",
+      "Pass both floor_construction AND thermal_mass_factor=3.0",
+      "Assert result = tau_air * 3.0 (floor_construction ignored)",
+      "Create test_thermal_mass_factor_alone()",
+      "Pass thermal_mass_factor=2.0 without floor_construction",
+      "Assert result = tau_air * 2.0",
+      "VERIFY: pytest tests/test_physics.py -k thermal_mass_factor -v passes"
+    ],
+    "passes": false
+  },
+  {
+    "id": "4.5",
+    "category": "test",
+    "description": "Add tests for input validation edge cases",
+    "steps": [
+      "Create test_pipe_depth_clamped_when_exceeds_thickness()",
+      "Pass pipe_depth_mm=80 with slab_thickness_mm=60",
+      "Assert pipe_depth clamped to 60 * 0.45 = 27mm",
+      "Create test_invalid_slab_type_raises()",
+      "Pass slab_type='invalid'",
+      "Assert KeyError or appropriate handling",
+      "Create test_thick_slab_warning() with slab_thickness_mm=120",
+      "Assert calculation still works (warn but don't fail)",
+      "VERIFY: pytest tests/test_physics.py -k validation -v passes"
+    ],
+    "passes": false
+  },
+  {
+    "id": "5.1",
+    "category": "test",
+    "description": "Add regression tests for non-floor heating types",
+    "steps": [
+      "Create test_radiator_unchanged()",
+      "Call calculate_thermal_time_constant with heating_type='radiator', same params as before",
+      "Assert result equals pre-change calculation (no slab added)",
+      "Create test_convector_unchanged() with heating_type='convector'",
+      "Create test_forced_air_unchanged() with heating_type='forced_air'",
+      "VERIFY: pytest tests/test_physics.py -k unchanged -v passes"
+    ],
+    "passes": false
+  },
+  {
+    "id": "6.1",
+    "category": "infrastructure",
+    "description": "Run full test suite and verify no regressions",
+    "steps": [
+      "Run pytest tests/ -v --tb=short",
+      "Ensure all existing tests pass",
+      "Ensure all new tests pass",
+      "Run pytest --cov=custom_components/adaptive_thermostat to check coverage",
+      "VERIFY: pytest tests/ -v returns 0 exit code with all tests passing"
+    ],
+    "passes": false
+  }
+]
