@@ -488,3 +488,312 @@ class TestOpenWindowDetectorPauseLifecycle:
         # 106 seconds from original start (61s from second trigger) - pause expires
         time_106s = now + timedelta(seconds=106)
         assert detector.should_pause(time_106s) is False
+
+
+class TestOpenWindowDetectorCooldownSuppression:
+    """Test OpenWindowDetector cooldown and suppression features."""
+
+    # Cooldown tests
+    def test_cooldown_prevents_retriggering(self):
+        """Test that cooldown prevents rapid re-triggering of detection."""
+        detector = OpenWindowDetector(cooldown=60)  # 1 minute cooldown
+        now = datetime(2024, 1, 15, 10, 0, 0)
+
+        # Set up and trigger first detection
+        detector.record_temperature(now, 21.0)
+        detector.record_temperature(now + timedelta(seconds=30), 20.0)
+        detector.trigger_detection(now + timedelta(seconds=30))
+
+        # 30 seconds later - in cooldown
+        assert detector.in_cooldown(now + timedelta(seconds=60)) is True
+
+        # 90 seconds later - cooldown expired
+        assert detector.in_cooldown(now + timedelta(seconds=120)) is False
+
+    def test_cooldown_blocks_check_for_drop(self):
+        """Test that check_for_drop() returns False during cooldown period."""
+        detector = OpenWindowDetector(cooldown=60)  # 1 minute cooldown
+        now = datetime(2024, 1, 15, 10, 0, 0)
+
+        # First detection
+        detector.record_temperature(now, 21.0)
+        detector.record_temperature(now + timedelta(seconds=30), 20.0)
+        assert detector.check_for_drop(now + timedelta(seconds=30)) is True
+        detector.trigger_detection(now + timedelta(seconds=30))
+
+        # Add another big drop during cooldown
+        detector.record_temperature(now + timedelta(seconds=45), 19.5)
+
+        # check_for_drop should return False even though drop exists (in cooldown)
+        assert detector.check_for_drop(now + timedelta(seconds=45)) is False
+
+        # After cooldown expires, should detect drop again
+        detector.record_temperature(now + timedelta(seconds=120), 19.0)
+        assert detector.check_for_drop(now + timedelta(seconds=120)) is True
+
+    def test_cooldown_default_value(self):
+        """Test that cooldown defaults to DEFAULT_OWD_COOLDOWN (2700 seconds = 45 min)."""
+        detector = OpenWindowDetector()  # No cooldown specified
+        now = datetime(2024, 1, 15, 10, 0, 0)
+
+        detector.trigger_detection(now)
+
+        # Should be in cooldown after 30 minutes (1800s)
+        assert detector.in_cooldown(now + timedelta(seconds=1800)) is True
+
+        # Should be in cooldown after 44 minutes (2640s)
+        assert detector.in_cooldown(now + timedelta(seconds=2640)) is True
+
+        # Should NOT be in cooldown after 46 minutes (2760s > 2700s)
+        assert detector.in_cooldown(now + timedelta(seconds=2760)) is False
+
+    def test_cooldown_configurable(self):
+        """Test that cooldown duration is configurable via constructor."""
+        # Test with 120 second cooldown
+        detector_120 = OpenWindowDetector(cooldown=120)
+        now = datetime(2024, 1, 15, 10, 0, 0)
+
+        detector_120.trigger_detection(now)
+
+        # 60 seconds - in cooldown
+        assert detector_120.in_cooldown(now + timedelta(seconds=60)) is True
+
+        # 119 seconds - in cooldown
+        assert detector_120.in_cooldown(now + timedelta(seconds=119)) is True
+
+        # 121 seconds - cooldown expired
+        assert detector_120.in_cooldown(now + timedelta(seconds=121)) is False
+
+    def test_cooldown_tracks_last_detection_time(self):
+        """Test that _last_detection_time tracks when last detection occurred."""
+        detector = OpenWindowDetector(cooldown=60)
+        now = datetime(2024, 1, 15, 10, 0, 0)
+
+        # Initially no detection
+        assert detector._last_detection_time is None
+
+        # First trigger
+        detector.trigger_detection(now)
+        assert detector._last_detection_time == now
+
+        # Second trigger updates time
+        later = now + timedelta(seconds=120)
+        detector.trigger_detection(later)
+        assert detector._last_detection_time == later
+
+    def test_cooldown_resets_on_new_detection(self):
+        """Test that triggering new detection resets cooldown timer."""
+        detector = OpenWindowDetector(cooldown=60)
+        now = datetime(2024, 1, 15, 10, 0, 0)
+
+        # First detection
+        detector.trigger_detection(now)
+
+        # 70 seconds later - cooldown expired
+        time_70s = now + timedelta(seconds=70)
+        assert detector.in_cooldown(time_70s) is False
+
+        # Trigger again - resets cooldown
+        detector.trigger_detection(time_70s)
+
+        # 100 seconds from original (30s from second trigger) - in cooldown
+        time_100s = now + timedelta(seconds=100)
+        assert detector.in_cooldown(time_100s) is True
+
+        # 131 seconds from original (61s from second trigger) - cooldown expired
+        time_131s = now + timedelta(seconds=131)
+        assert detector.in_cooldown(time_131s) is False
+
+    def test_in_cooldown_without_prior_detection(self):
+        """Test that in_cooldown() returns False when no detection has occurred."""
+        detector = OpenWindowDetector(cooldown=60)
+        now = datetime(2024, 1, 15, 10, 0, 0)
+
+        # No detection triggered yet
+        assert detector.in_cooldown(now) is False
+
+    # Suppression tests
+    def test_suppression_blocks_detection(self):
+        """Test that suppression prevents check_for_drop() from triggering."""
+        detector = OpenWindowDetector()
+        now = datetime(2024, 1, 15, 10, 0, 0)
+
+        # Suppress for 5 minutes
+        detector.suppress_detection(now, duration=300)
+
+        # Set up temp drop during suppression
+        detector.record_temperature(now, 21.0)
+        detector.record_temperature(now + timedelta(seconds=30), 19.5)
+
+        # check_for_drop should return False even though drop exceeds threshold
+        assert detector.check_for_drop(now + timedelta(seconds=30)) is False
+
+    def test_suppression_duration(self):
+        """Test that suppression lasts for specified duration."""
+        detector = OpenWindowDetector()
+        now = datetime(2024, 1, 15, 10, 0, 0)
+
+        # Suppress for 300 seconds (5 minutes)
+        detector.suppress_detection(now, duration=300)
+
+        # 2 minutes later - still suppressed
+        assert detector.is_suppressed(now + timedelta(seconds=120)) is True
+
+        # 4.5 minutes later - still suppressed
+        assert detector.is_suppressed(now + timedelta(seconds=270)) is True
+
+        # 5.5 minutes later - suppression expired
+        assert detector.is_suppressed(now + timedelta(seconds=330)) is False
+
+    def test_suppression_tracks_suppressed_until(self):
+        """Test that _suppressed_until tracks when suppression expires."""
+        detector = OpenWindowDetector()
+        now = datetime(2024, 1, 15, 10, 0, 0)
+
+        # Initially not suppressed
+        assert detector._suppressed_until is None
+
+        # Suppress for 300 seconds
+        detector.suppress_detection(now, duration=300)
+
+        # Should set _suppressed_until to now + 300s
+        expected_until = now + timedelta(seconds=300)
+        assert detector._suppressed_until == expected_until
+
+    def test_suppression_prevents_false_positives_after_setpoint_change(self):
+        """Test suppression use case: prevent false positives during setpoint changes."""
+        detector = OpenWindowDetector()
+        now = datetime(2024, 1, 15, 10, 0, 0)
+
+        # User changes setpoint from 22°C to 20°C
+        # Suppress detection for 10 minutes to avoid false positive
+        detector.suppress_detection(now, duration=600)
+
+        # Temperature drops naturally from 22°C to 20.5°C
+        detector.record_temperature(now, 22.0)
+        detector.record_temperature(now + timedelta(seconds=60), 21.5)
+        detector.record_temperature(now + timedelta(seconds=120), 21.0)
+        detector.record_temperature(now + timedelta(seconds=180), 20.5)
+
+        # Should not detect drop during suppression (even though drop = 1.5°C > threshold)
+        assert detector.check_for_drop(now + timedelta(seconds=180)) is False
+
+        # After suppression expires, detection works normally
+        detector.record_temperature(now + timedelta(seconds=660), 20.0)
+        # Add a new rapid drop after suppression
+        detector.record_temperature(now + timedelta(seconds=690), 19.0)
+        assert detector.check_for_drop(now + timedelta(seconds=690)) is True
+
+    def test_is_suppressed_without_prior_suppression(self):
+        """Test that is_suppressed() returns False when no suppression is active."""
+        detector = OpenWindowDetector()
+        now = datetime(2024, 1, 15, 10, 0, 0)
+
+        # No suppression set
+        assert detector.is_suppressed(now) is False
+
+    def test_suppression_can_be_renewed(self):
+        """Test that calling suppress_detection() again extends suppression."""
+        detector = OpenWindowDetector()
+        now = datetime(2024, 1, 15, 10, 0, 0)
+
+        # Initial suppression for 60 seconds
+        detector.suppress_detection(now, duration=60)
+
+        # 45 seconds later - still suppressed
+        time_45s = now + timedelta(seconds=45)
+        assert detector.is_suppressed(time_45s) is True
+
+        # Extend suppression for another 60 seconds from time_45s
+        detector.suppress_detection(time_45s, duration=60)
+
+        # 70 seconds from original start (25s from renewal) - still suppressed
+        time_70s = now + timedelta(seconds=70)
+        assert detector.is_suppressed(time_70s) is True
+
+        # 106 seconds from original start (61s from renewal) - suppression expired
+        time_106s = now + timedelta(seconds=106)
+        assert detector.is_suppressed(time_106s) is False
+
+    def test_suppression_works_independently_of_cooldown(self):
+        """Test that suppression and cooldown are independent mechanisms."""
+        detector = OpenWindowDetector(cooldown=60)
+        now = datetime(2024, 1, 15, 10, 0, 0)
+
+        # Suppress for 30 seconds
+        detector.suppress_detection(now, duration=30)
+
+        # Trigger detection (starts cooldown but doesn't affect suppression)
+        detector.trigger_detection(now)
+
+        # 15 seconds later - both suppressed and in cooldown
+        time_15s = now + timedelta(seconds=15)
+        assert detector.is_suppressed(time_15s) is True
+        assert detector.in_cooldown(time_15s) is True
+
+        # 35 seconds later - suppression expired, still in cooldown
+        time_35s = now + timedelta(seconds=35)
+        assert detector.is_suppressed(time_35s) is False
+        assert detector.in_cooldown(time_35s) is True
+
+        # 65 seconds later - both expired
+        time_65s = now + timedelta(seconds=65)
+        assert detector.is_suppressed(time_65s) is False
+        assert detector.in_cooldown(time_65s) is False
+
+    # Combined cooldown + suppression tests
+    def test_check_for_drop_respects_both_cooldown_and_suppression(self):
+        """Test that check_for_drop() returns False if either cooldown or suppression is active."""
+        detector = OpenWindowDetector(cooldown=60)
+        now = datetime(2024, 1, 15, 10, 0, 0)
+
+        # Set up a detectable drop
+        detector.record_temperature(now, 21.0)
+        detector.record_temperature(now + timedelta(seconds=30), 20.0)
+
+        # Test 1: Cooldown active
+        detector.trigger_detection(now)
+        assert detector.check_for_drop(now + timedelta(seconds=30)) is False
+
+        # Test 2: Wait for cooldown to expire, then test suppression
+        time_after_cooldown = now + timedelta(seconds=120)
+
+        # Add new drop
+        detector.record_temperature(time_after_cooldown, 21.0)
+        detector.record_temperature(time_after_cooldown + timedelta(seconds=30), 20.0)
+
+        # Suppress
+        detector.suppress_detection(time_after_cooldown, duration=60)
+
+        # Should not detect drop (suppressed)
+        assert detector.check_for_drop(time_after_cooldown + timedelta(seconds=30)) is False
+
+    def test_cooldown_and_suppression_lifecycle(self):
+        """Test complete lifecycle of cooldown and suppression together."""
+        detector = OpenWindowDetector(cooldown=120)
+        now = datetime(2024, 1, 15, 10, 0, 0)
+
+        # 1. Initial state - no cooldown, no suppression
+        assert detector.in_cooldown(now) is False
+        assert detector.is_suppressed(now) is False
+
+        # 2. Trigger detection - starts cooldown
+        detector.trigger_detection(now)
+        assert detector.in_cooldown(now) is True
+        assert detector.is_suppressed(now) is False
+
+        # 3. Add suppression while in cooldown
+        time_30s = now + timedelta(seconds=30)
+        detector.suppress_detection(time_30s, duration=60)
+        assert detector.in_cooldown(time_30s) is True
+        assert detector.is_suppressed(time_30s) is True
+
+        # 4. Suppression expires, cooldown still active
+        time_100s = now + timedelta(seconds=100)
+        assert detector.in_cooldown(time_100s) is True
+        assert detector.is_suppressed(time_100s) is False
+
+        # 5. Both expired
+        time_150s = now + timedelta(seconds=150)
+        assert detector.in_cooldown(time_150s) is False
+        assert detector.is_suppressed(time_150s) is False
