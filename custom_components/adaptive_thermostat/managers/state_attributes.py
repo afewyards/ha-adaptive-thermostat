@@ -93,6 +93,9 @@ def build_state_attributes(thermostat: SmartThermostat) -> dict[str, Any]:
     # Contact sensor status
     _add_contact_sensor_attributes(thermostat, attrs)
 
+    # Open window detection status
+    _add_open_window_detection_attributes(thermostat, attrs)
+
     # Ke learning status
     _add_ke_learning_attributes(thermostat, attrs)
 
@@ -168,6 +171,37 @@ def _add_contact_sensor_attributes(
             time_until = thermostat._contact_sensor_handler.get_time_until_action()
             if time_until is not None and time_until > 0:
                 attrs["contact_pause_in"] = time_until
+
+
+def _add_open_window_detection_attributes(
+    thermostat: SmartThermostat, attrs: dict[str, Any]
+) -> None:
+    """Add open window detection status attributes."""
+    from datetime import datetime, timedelta
+
+    # Always add attributes, even if detector is None
+    if thermostat._open_window_detector:
+        # Use now from hass if available (for testing), otherwise current time
+        now = getattr(thermostat.hass, '_test_now', None) or datetime.now()
+
+        attrs["open_window_detection_active"] = thermostat._open_window_detector.should_pause(now)
+
+        # Calculate cooldown remaining if in cooldown
+        if thermostat._open_window_detector.in_cooldown(now):
+            last_detection = thermostat._open_window_detector._last_detection_time
+            cooldown_duration = thermostat._open_window_detector._cooldown
+            if last_detection and isinstance(cooldown_duration, (int, float)):
+                cooldown_end = last_detection + timedelta(seconds=cooldown_duration)
+                remaining = (cooldown_end - now).total_seconds()
+                attrs["open_window_cooldown_remaining"] = int(remaining)
+            else:
+                attrs["open_window_cooldown_remaining"] = None
+        else:
+            attrs["open_window_cooldown_remaining"] = None
+    else:
+        # No detector - return default values
+        attrs["open_window_detection_active"] = False
+        attrs["open_window_cooldown_remaining"] = None
 
 
 def _add_ke_learning_attributes(

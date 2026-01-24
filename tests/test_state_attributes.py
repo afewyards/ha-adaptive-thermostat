@@ -633,3 +633,376 @@ class TestDutyAccumulatorAttributes:
         pct = _compute_duty_accumulator_pct(thermostat)
 
         assert pct == 0.0
+
+
+class TestOpenWindowDetectionAttributes:
+    """Tests for open window detection state attributes."""
+
+    def test_owd_active_false_when_disabled(self):
+        """Test open_window_detection_active is False when OWD disabled (no detector)."""
+        from custom_components.adaptive_thermostat.managers.state_attributes import (
+            build_state_attributes,
+        )
+
+        thermostat = MagicMock()
+        thermostat._away_temp = 18.0
+        thermostat._eco_temp = 19.0
+        thermostat._boost_temp = 24.0
+        thermostat._comfort_temp = 21.0
+        thermostat._home_temp = 20.0
+        thermostat._sleep_temp = 18.0
+        thermostat._activity_temp = 20.0
+        thermostat._control_output = 50.0
+        thermostat._kp = 20.0
+        thermostat._ki = 0.01
+        thermostat._kd = 100.0
+        thermostat._ke = 0.5
+        thermostat.pid_mode = "auto"
+        thermostat.pid_control_i = 5.0
+        thermostat._pid_controller = MagicMock()
+        thermostat._pid_controller.outdoor_temp_lagged = 5.0
+        thermostat._pid_controller.outdoor_temp_lag_tau = 3600.0
+        thermostat._heater_controller = MagicMock()
+        thermostat._heater_controller.heater_cycle_count = 100
+        thermostat._heater_controller.cooler_cycle_count = 50
+        thermostat._heater_controller.duty_accumulator_seconds = 120.5
+        thermostat._heater_controller.min_on_cycle_duration = 300.0
+        thermostat._night_setback = None
+        thermostat._night_setback_config = None
+        thermostat._night_setback_controller = None
+        thermostat._control_output_manager = None
+        thermostat._ke_learner = None
+        thermostat._heater_control_failed = False
+        thermostat._contact_sensor_handler = None
+        thermostat._open_window_detector = None  # No detector
+        thermostat.in_learning_grace_period = False
+        thermostat.hass = MagicMock()
+        thermostat.hass.data = {}
+
+        attrs = build_state_attributes(thermostat)
+
+        assert "open_window_detection_active" in attrs
+        assert attrs["open_window_detection_active"] is False
+
+    def test_owd_active_false_when_no_detection_triggered(self):
+        """Test open_window_detection_active is False when no detection triggered."""
+        from custom_components.adaptive_thermostat.managers.state_attributes import (
+            build_state_attributes,
+        )
+
+        thermostat = MagicMock()
+        thermostat._away_temp = 18.0
+        thermostat._eco_temp = 19.0
+        thermostat._boost_temp = 24.0
+        thermostat._comfort_temp = 21.0
+        thermostat._home_temp = 20.0
+        thermostat._sleep_temp = 18.0
+        thermostat._activity_temp = 20.0
+        thermostat._control_output = 50.0
+        thermostat._kp = 20.0
+        thermostat._ki = 0.01
+        thermostat._kd = 100.0
+        thermostat._ke = 0.5
+        thermostat.pid_mode = "auto"
+        thermostat.pid_control_i = 5.0
+        thermostat._pid_controller = MagicMock()
+        thermostat._pid_controller.outdoor_temp_lagged = 5.0
+        thermostat._pid_controller.outdoor_temp_lag_tau = 3600.0
+        thermostat._heater_controller = MagicMock()
+        thermostat._heater_controller.heater_cycle_count = 100
+        thermostat._heater_controller.cooler_cycle_count = 50
+        thermostat._heater_controller.duty_accumulator_seconds = 120.5
+        thermostat._heater_controller.min_on_cycle_duration = 300.0
+        thermostat._night_setback = None
+        thermostat._night_setback_config = None
+        thermostat._night_setback_controller = None
+        thermostat._control_output_manager = None
+        thermostat._ke_learner = None
+        thermostat._heater_control_failed = False
+        thermostat._contact_sensor_handler = None
+        thermostat.in_learning_grace_period = False
+        thermostat.hass = MagicMock()
+        thermostat.hass.data = {}
+
+        # Create detector but no pause active
+        detector = MagicMock()
+        detector.should_pause.return_value = False
+        detector.in_cooldown.return_value = False
+        thermostat._open_window_detector = detector
+
+        attrs = build_state_attributes(thermostat)
+
+        assert "open_window_detection_active" in attrs
+        assert attrs["open_window_detection_active"] is False
+
+    def test_owd_active_true_when_paused(self):
+        """Test open_window_detection_active is True when pause is active."""
+        from custom_components.adaptive_thermostat.managers.state_attributes import (
+            build_state_attributes,
+        )
+
+        thermostat = MagicMock()
+        thermostat._away_temp = 18.0
+        thermostat._eco_temp = 19.0
+        thermostat._boost_temp = 24.0
+        thermostat._comfort_temp = 21.0
+        thermostat._home_temp = 20.0
+        thermostat._sleep_temp = 18.0
+        thermostat._activity_temp = 20.0
+        thermostat._control_output = 50.0
+        thermostat._kp = 20.0
+        thermostat._ki = 0.01
+        thermostat._kd = 100.0
+        thermostat._ke = 0.5
+        thermostat.pid_mode = "auto"
+        thermostat.pid_control_i = 5.0
+        thermostat._pid_controller = MagicMock()
+        thermostat._pid_controller.outdoor_temp_lagged = 5.0
+        thermostat._pid_controller.outdoor_temp_lag_tau = 3600.0
+        thermostat._heater_controller = MagicMock()
+        thermostat._heater_controller.heater_cycle_count = 100
+        thermostat._heater_controller.cooler_cycle_count = 50
+        thermostat._heater_controller.duty_accumulator_seconds = 120.5
+        thermostat._heater_controller.min_on_cycle_duration = 300.0
+        thermostat._night_setback = None
+        thermostat._night_setback_config = None
+        thermostat._night_setback_controller = None
+        thermostat._control_output_manager = None
+        thermostat._ke_learner = None
+        thermostat._heater_control_failed = False
+        thermostat._contact_sensor_handler = None
+        thermostat.in_learning_grace_period = False
+        thermostat.hass = MagicMock()
+        thermostat.hass.data = {}
+
+        # Create detector with active pause
+        detector = MagicMock()
+        detector.should_pause.return_value = True
+        detector.in_cooldown.return_value = False
+        thermostat._open_window_detector = detector
+
+        attrs = build_state_attributes(thermostat)
+
+        assert "open_window_detection_active" in attrs
+        assert attrs["open_window_detection_active"] is True
+
+    def test_owd_active_false_after_pause_expires(self):
+        """Test open_window_detection_active is False after pause expires."""
+        from custom_components.adaptive_thermostat.managers.state_attributes import (
+            build_state_attributes,
+        )
+
+        thermostat = MagicMock()
+        thermostat._away_temp = 18.0
+        thermostat._eco_temp = 19.0
+        thermostat._boost_temp = 24.0
+        thermostat._comfort_temp = 21.0
+        thermostat._home_temp = 20.0
+        thermostat._sleep_temp = 18.0
+        thermostat._activity_temp = 20.0
+        thermostat._control_output = 50.0
+        thermostat._kp = 20.0
+        thermostat._ki = 0.01
+        thermostat._kd = 100.0
+        thermostat._ke = 0.5
+        thermostat.pid_mode = "auto"
+        thermostat.pid_control_i = 5.0
+        thermostat._pid_controller = MagicMock()
+        thermostat._pid_controller.outdoor_temp_lagged = 5.0
+        thermostat._pid_controller.outdoor_temp_lag_tau = 3600.0
+        thermostat._heater_controller = MagicMock()
+        thermostat._heater_controller.heater_cycle_count = 100
+        thermostat._heater_controller.cooler_cycle_count = 50
+        thermostat._heater_controller.duty_accumulator_seconds = 120.5
+        thermostat._heater_controller.min_on_cycle_duration = 300.0
+        thermostat._night_setback = None
+        thermostat._night_setback_config = None
+        thermostat._night_setback_controller = None
+        thermostat._control_output_manager = None
+        thermostat._ke_learner = None
+        thermostat._heater_control_failed = False
+        thermostat._contact_sensor_handler = None
+        thermostat.in_learning_grace_period = False
+        thermostat.hass = MagicMock()
+        thermostat.hass.data = {}
+        # Set test timestamp
+        now = datetime(2024, 1, 15, 12, 0, 0)
+        thermostat.hass._test_now = now
+
+        # Create detector with expired pause (not in pause, but in cooldown)
+        detector = MagicMock()
+        detector.should_pause.return_value = False
+        detector.in_cooldown.return_value = True
+        detector._last_detection_time = datetime(2024, 1, 15, 11, 50, 0)
+        detector._cooldown = 2700
+        thermostat._open_window_detector = detector
+
+        attrs = build_state_attributes(thermostat)
+
+        assert "open_window_detection_active" in attrs
+        assert attrs["open_window_detection_active"] is False
+
+    def test_owd_cooldown_remaining_none_when_no_cooldown(self):
+        """Test open_window_cooldown_remaining is None when no cooldown active."""
+        from custom_components.adaptive_thermostat.managers.state_attributes import (
+            build_state_attributes,
+        )
+
+        thermostat = MagicMock()
+        thermostat._away_temp = 18.0
+        thermostat._eco_temp = 19.0
+        thermostat._boost_temp = 24.0
+        thermostat._comfort_temp = 21.0
+        thermostat._home_temp = 20.0
+        thermostat._sleep_temp = 18.0
+        thermostat._activity_temp = 20.0
+        thermostat._control_output = 50.0
+        thermostat._kp = 20.0
+        thermostat._ki = 0.01
+        thermostat._kd = 100.0
+        thermostat._ke = 0.5
+        thermostat.pid_mode = "auto"
+        thermostat.pid_control_i = 5.0
+        thermostat._pid_controller = MagicMock()
+        thermostat._pid_controller.outdoor_temp_lagged = 5.0
+        thermostat._pid_controller.outdoor_temp_lag_tau = 3600.0
+        thermostat._heater_controller = MagicMock()
+        thermostat._heater_controller.heater_cycle_count = 100
+        thermostat._heater_controller.cooler_cycle_count = 50
+        thermostat._heater_controller.duty_accumulator_seconds = 120.5
+        thermostat._heater_controller.min_on_cycle_duration = 300.0
+        thermostat._night_setback = None
+        thermostat._night_setback_config = None
+        thermostat._night_setback_controller = None
+        thermostat._control_output_manager = None
+        thermostat._ke_learner = None
+        thermostat._heater_control_failed = False
+        thermostat._contact_sensor_handler = None
+        thermostat.in_learning_grace_period = False
+        thermostat.hass = MagicMock()
+        thermostat.hass.data = {}
+
+        # Create detector with no cooldown active
+        detector = MagicMock()
+        detector.should_pause.return_value = False
+        detector.in_cooldown.return_value = False
+        thermostat._open_window_detector = detector
+
+        attrs = build_state_attributes(thermostat)
+
+        assert "open_window_cooldown_remaining" in attrs
+        assert attrs["open_window_cooldown_remaining"] is None
+
+    def test_owd_cooldown_remaining_shows_seconds(self):
+        """Test open_window_cooldown_remaining shows remaining seconds during cooldown."""
+        from custom_components.adaptive_thermostat.managers.state_attributes import (
+            build_state_attributes,
+        )
+
+        thermostat = MagicMock()
+        thermostat._away_temp = 18.0
+        thermostat._eco_temp = 19.0
+        thermostat._boost_temp = 24.0
+        thermostat._comfort_temp = 21.0
+        thermostat._home_temp = 20.0
+        thermostat._sleep_temp = 18.0
+        thermostat._activity_temp = 20.0
+        thermostat._control_output = 50.0
+        thermostat._kp = 20.0
+        thermostat._ki = 0.01
+        thermostat._kd = 100.0
+        thermostat._ke = 0.5
+        thermostat.pid_mode = "auto"
+        thermostat.pid_control_i = 5.0
+        thermostat._pid_controller = MagicMock()
+        thermostat._pid_controller.outdoor_temp_lagged = 5.0
+        thermostat._pid_controller.outdoor_temp_lag_tau = 3600.0
+        thermostat._heater_controller = MagicMock()
+        thermostat._heater_controller.heater_cycle_count = 100
+        thermostat._heater_controller.cooler_cycle_count = 50
+        thermostat._heater_controller.duty_accumulator_seconds = 120.5
+        thermostat._heater_controller.min_on_cycle_duration = 300.0
+        thermostat._night_setback = None
+        thermostat._night_setback_config = None
+        thermostat._night_setback_controller = None
+        thermostat._control_output_manager = None
+        thermostat._ke_learner = None
+        thermostat._heater_control_failed = False
+        thermostat._contact_sensor_handler = None
+        thermostat.in_learning_grace_period = False
+        thermostat.hass = MagicMock()
+        thermostat.hass.data = {}
+
+        # Create detector with cooldown active
+        # Simulate cooldown: last detection at T-600s, cooldown=2700s, remaining=2100s
+        now = datetime(2024, 1, 15, 12, 0, 0)
+        last_detection = datetime(2024, 1, 15, 11, 50, 0)  # 10 minutes ago
+        cooldown_duration = 2700  # 45 minutes
+        cooldown_end = last_detection + timedelta(seconds=cooldown_duration)
+        remaining_seconds = int((cooldown_end - now).total_seconds())
+
+        # Set test timestamp
+        thermostat.hass._test_now = now
+
+        detector = MagicMock()
+        detector.should_pause.return_value = False
+        detector.in_cooldown.return_value = True
+        detector._last_detection_time = last_detection
+        detector._cooldown = cooldown_duration
+        thermostat._open_window_detector = detector
+
+        attrs = build_state_attributes(thermostat)
+
+        assert "open_window_cooldown_remaining" in attrs
+        assert attrs["open_window_cooldown_remaining"] == remaining_seconds
+        # Verify it's approximately 2100 seconds (35 minutes remaining)
+        assert attrs["open_window_cooldown_remaining"] == 2100
+
+    def test_owd_attributes_not_present_when_no_detector(self):
+        """Test OWD attributes are still present (False/None) when no detector."""
+        from custom_components.adaptive_thermostat.managers.state_attributes import (
+            build_state_attributes,
+        )
+
+        thermostat = MagicMock()
+        thermostat._away_temp = 18.0
+        thermostat._eco_temp = 19.0
+        thermostat._boost_temp = 24.0
+        thermostat._comfort_temp = 21.0
+        thermostat._home_temp = 20.0
+        thermostat._sleep_temp = 18.0
+        thermostat._activity_temp = 20.0
+        thermostat._control_output = 50.0
+        thermostat._kp = 20.0
+        thermostat._ki = 0.01
+        thermostat._kd = 100.0
+        thermostat._ke = 0.5
+        thermostat.pid_mode = "auto"
+        thermostat.pid_control_i = 5.0
+        thermostat._pid_controller = MagicMock()
+        thermostat._pid_controller.outdoor_temp_lagged = 5.0
+        thermostat._pid_controller.outdoor_temp_lag_tau = 3600.0
+        thermostat._heater_controller = MagicMock()
+        thermostat._heater_controller.heater_cycle_count = 100
+        thermostat._heater_controller.cooler_cycle_count = 50
+        thermostat._heater_controller.duty_accumulator_seconds = 120.5
+        thermostat._heater_controller.min_on_cycle_duration = 300.0
+        thermostat._night_setback = None
+        thermostat._night_setback_config = None
+        thermostat._night_setback_controller = None
+        thermostat._control_output_manager = None
+        thermostat._ke_learner = None
+        thermostat._heater_control_failed = False
+        thermostat._contact_sensor_handler = None
+        thermostat._open_window_detector = None
+        thermostat.in_learning_grace_period = False
+        thermostat.hass = MagicMock()
+        thermostat.hass.data = {}
+
+        attrs = build_state_attributes(thermostat)
+
+        # Attributes should be present with default values
+        assert "open_window_detection_active" in attrs
+        assert attrs["open_window_detection_active"] is False
+        assert "open_window_cooldown_remaining" in attrs
+        assert attrs["open_window_cooldown_remaining"] is None
