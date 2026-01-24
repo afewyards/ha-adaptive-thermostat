@@ -797,3 +797,213 @@ class TestOpenWindowDetectorCooldownSuppression:
         time_150s = now + timedelta(seconds=150)
         assert detector.in_cooldown(time_150s) is False
         assert detector.is_suppressed(time_150s) is False
+
+
+class TestOpenWindowDetectorResetClear:
+    """Test OpenWindowDetector reset and clear methods."""
+
+    def test_clear_history_empties_ring_buffer(self):
+        """Test that clear_history() empties the temperature history ring buffer."""
+        detector = OpenWindowDetector()
+        now = datetime(2024, 1, 15, 10, 0, 0)
+
+        # Add some temperature readings
+        detector.record_temperature(now, 21.0)
+        detector.record_temperature(now + timedelta(seconds=30), 20.5)
+        detector.record_temperature(now + timedelta(seconds=60), 20.0)
+
+        # Verify history has entries
+        assert len(detector._temp_history) == 3
+
+        # Clear history
+        detector.clear_history()
+
+        # Verify history is empty
+        assert len(detector._temp_history) == 0
+
+    def test_clear_history_can_be_called_on_empty_buffer(self):
+        """Test that clear_history() works on empty buffer without error."""
+        detector = OpenWindowDetector()
+
+        # Clear empty buffer - should not raise
+        detector.clear_history()
+
+        # Verify still empty
+        assert len(detector._temp_history) == 0
+
+    def test_clear_history_does_not_affect_pause_state(self):
+        """Test that clear_history() only clears temp history, not pause state."""
+        detector = OpenWindowDetector()
+        now = datetime(2024, 1, 15, 10, 0, 0)
+
+        # Add history and trigger detection
+        detector.record_temperature(now, 21.0)
+        detector.trigger_detection(now)
+
+        # Verify pause is active
+        assert detector.should_pause(now) is True
+
+        # Clear history
+        detector.clear_history()
+
+        # Verify pause state unchanged, only history cleared
+        assert len(detector._temp_history) == 0
+        assert detector.should_pause(now) is True
+
+    def test_reset_clears_all_state_except_cooldown(self):
+        """Test that reset() clears all state except cooldown (last_detection_time)."""
+        detector = OpenWindowDetector()
+        now = datetime(2024, 1, 15, 10, 0, 0)
+
+        # Set up full state
+        detector.record_temperature(now, 21.0)
+        detector.record_temperature(now + timedelta(seconds=30), 20.5)
+        detector.trigger_detection(now + timedelta(seconds=30))
+        detector.suppress_detection(now + timedelta(seconds=30), 300)
+
+        # Verify state is set
+        assert len(detector._temp_history) == 2
+        assert detector._detection_triggered is True
+        assert detector._pause_start_time is not None
+        assert detector._suppressed_until is not None
+        assert detector._last_detection_time is not None
+
+        # Reset
+        detector.reset()
+
+        # Verify history cleared
+        assert len(detector._temp_history) == 0
+
+        # Verify pause state cleared
+        assert detector._detection_triggered is False
+        assert detector._pause_start_time is None
+
+        # Verify suppression cleared
+        assert detector._suppressed_until is None
+
+        # BUT cooldown (last_detection_time) should remain
+        assert detector._last_detection_time is not None
+        assert detector._last_detection_time == now + timedelta(seconds=30)
+
+    def test_reset_on_fresh_detector(self):
+        """Test that reset() works on freshly initialized detector."""
+        detector = OpenWindowDetector()
+
+        # Reset without any prior state
+        detector.reset()
+
+        # Verify all state is clean
+        assert len(detector._temp_history) == 0
+        assert detector._detection_triggered is False
+        assert detector._pause_start_time is None
+        assert detector._suppressed_until is None
+        assert detector._last_detection_time is None
+
+    def test_reset_clears_pause_expired_flags(self):
+        """Test that reset() clears pause expiration flags."""
+        detector = OpenWindowDetector(pause_duration=60)
+        now = datetime(2024, 1, 15, 10, 0, 0)
+
+        # Trigger and let pause expire
+        detector.trigger_detection(now)
+        detector.should_pause(now + timedelta(seconds=61))  # Triggers expiration
+
+        # Verify pause expired flag is set
+        assert detector.pause_just_expired() is True
+
+        # Reset
+        detector.reset()
+
+        # Verify flags cleared
+        assert detector._pause_expired_flag is False
+        assert detector._expiration_detected is False
+
+    def test_reset_preserves_cooldown_for_anti_flapping(self):
+        """Test that reset() preserves cooldown to prevent rapid re-detection."""
+        detector = OpenWindowDetector(cooldown=120)
+        now = datetime(2024, 1, 15, 10, 0, 0)
+
+        # Trigger detection
+        detector.trigger_detection(now)
+
+        # Verify cooldown is active
+        assert detector.in_cooldown(now + timedelta(seconds=60)) is True
+
+        # Reset
+        detector.reset()
+
+        # Cooldown should still be active (prevents rapid re-triggering)
+        assert detector.in_cooldown(now + timedelta(seconds=60)) is True
+
+        # But pause should be inactive
+        assert detector.should_pause(now + timedelta(seconds=60)) is False
+
+    def test_get_action_returns_configured_action(self):
+        """Test that get_action() returns the configured action type."""
+        # Test default action (pause)
+        detector_default = OpenWindowDetector()
+        assert detector_default.get_action() == "pause"
+
+        # Test explicit pause action
+        detector_pause = OpenWindowDetector(action="pause")
+        assert detector_pause.get_action() == "pause"
+
+        # Test frost protection action
+        detector_frost = OpenWindowDetector(action="frost_protection")
+        assert detector_frost.get_action() == "frost_protection"
+
+    def test_get_action_immutable_after_init(self):
+        """Test that get_action() always returns the same value after initialization."""
+        detector = OpenWindowDetector(action="frost_protection")
+
+        # Call multiple times - should return same value
+        assert detector.get_action() == "frost_protection"
+        assert detector.get_action() == "frost_protection"
+        assert detector.get_action() == "frost_protection"
+
+    def test_clear_history_after_setpoint_change_scenario(self):
+        """Test clear_history() use case: preventing false positives during setpoint changes."""
+        detector = OpenWindowDetector()
+        now = datetime(2024, 1, 15, 10, 0, 0)
+
+        # Build up history at 22°C
+        for i in range(5):
+            detector.record_temperature(now + timedelta(seconds=i * 30), 22.0)
+
+        assert len(detector._temp_history) == 5
+
+        # User changes setpoint from 22°C to 20°C
+        # Clear history to avoid false detection during natural cooldown
+        detector.clear_history()
+
+        # Start fresh history at new setpoint
+        detector.record_temperature(now + timedelta(seconds=180), 21.5)
+        detector.record_temperature(now + timedelta(seconds=210), 21.0)
+
+        # Only recent history should exist
+        assert len(detector._temp_history) == 2
+        assert detector._temp_history[0][1] == 21.5
+        assert detector._temp_history[1][1] == 21.0
+
+    def test_reset_on_hvac_off_scenario(self):
+        """Test reset() use case: HVAC mode set to OFF."""
+        detector = OpenWindowDetector()
+        now = datetime(2024, 1, 15, 10, 0, 0)
+
+        # Simulate active detection during heating
+        detector.record_temperature(now, 21.0)
+        detector.record_temperature(now + timedelta(seconds=30), 20.0)
+        detector.trigger_detection(now + timedelta(seconds=30))
+        detector.suppress_detection(now, 300)
+
+        # User turns HVAC OFF
+        # Reset clears all active state except cooldown
+        detector.reset()
+
+        # When HVAC turns back on, detection should start fresh
+        assert len(detector._temp_history) == 0
+        assert detector.should_pause(now + timedelta(seconds=60)) is False
+        assert detector.is_suppressed(now + timedelta(seconds=60)) is False
+
+        # But cooldown prevents immediate re-detection if turned back on quickly
+        assert detector.in_cooldown(now + timedelta(seconds=60)) is True
