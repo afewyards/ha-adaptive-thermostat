@@ -2247,12 +2247,6 @@ class TestClimateOWDControlHeatingIntegration:
         # Fast forward past pause expiration
         time_after_pause = now + timedelta(seconds=61)
 
-        # Check if pause expired (this sets the internal flag)
-        assert detector.should_pause(time_after_pause) is False
-
-        # First call to pause_just_expired should return True
-        assert detector.pause_just_expired() is True
-
         # Mock thermostat with OWD detector and cycle dispatcher
         mock_thermostat = Mock()
         mock_thermostat._open_window_detector = detector
@@ -2263,6 +2257,7 @@ class TestClimateOWDControlHeatingIntegration:
         # This is what the implementation should do:
         if mock_thermostat._open_window_detector and \
            not mock_thermostat._open_window_detector.should_pause(time_after_pause):
+            # The should_pause call above sets the internal flag
             if mock_thermostat._open_window_detector.pause_just_expired():
                 # Emit ContactResumeEvent
                 mock_thermostat._cycle_dispatcher.emit(
