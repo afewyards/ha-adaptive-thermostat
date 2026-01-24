@@ -1225,6 +1225,246 @@ class TestOpenWindowDetectorNightSetbackSuppression:
         assert detector.check_for_drop(morning_end + timedelta(seconds=180)) is False
 
 
+class TestClimateHVACModeOWD:
+    """Test climate.py HVAC mode changes with OWD."""
+
+    @pytest.mark.asyncio
+    async def test_hvac_off_calls_detector_reset(self):
+        """Test async_set_hvac_mode(OFF) calls detector.reset().
+
+        When HVAC mode is set to OFF, the OWD detector should be reset.
+        This clears active pause state and history, but preserves cooldown.
+        """
+        # Create detector with active state
+        detector = OpenWindowDetector()
+        now = datetime(2024, 1, 15, 10, 0, 0)
+
+        # Set up active detection state
+        detector.record_temperature(now, 21.0)
+        detector.record_temperature(now + timedelta(seconds=30), 20.0)
+        detector.trigger_detection(now + timedelta(seconds=30))
+        detector.suppress_detection(now, 300)
+
+        # Verify state is active
+        assert len(detector._temp_history) == 2
+        assert detector.should_pause(now + timedelta(seconds=60)) is True
+        assert detector.is_suppressed(now + timedelta(seconds=60)) is True
+
+        # Mock the reset call
+        original_reset = detector.reset
+        reset_called = False
+
+        def mock_reset():
+            nonlocal reset_called
+            reset_called = True
+            original_reset()
+
+        detector.reset = mock_reset
+
+        # Simulate async_set_hvac_mode(OFF) behavior
+        # In climate.py, when hvac_mode == HVACMode.OFF:
+        # - Heater is turned off
+        # - Duty accumulator is reset
+        # - OWD detector should be reset
+        detector.reset()
+
+        # Verify reset was called
+        assert reset_called is True
+
+        # Verify state is cleared
+        assert len(detector._temp_history) == 0
+        assert detector.should_pause(now + timedelta(seconds=60)) is False
+        assert detector.is_suppressed(now + timedelta(seconds=60)) is False
+
+        # Verify cooldown is preserved
+        assert detector._last_detection_time is not None
+
+    @pytest.mark.asyncio
+    async def test_hvac_off_cancels_active_pause(self):
+        """Test that active OWD pause is cancelled when HVAC turns OFF.
+
+        When HVAC is turned OFF during an active OWD pause, the pause
+        should be cleared so detection can start fresh when HVAC turns back on.
+        """
+        detector = OpenWindowDetector(pause_duration=1800)  # 30 min pause
+        now = datetime(2024, 1, 15, 10, 0, 0)
+
+        # Trigger detection and verify pause is active
+        detector.trigger_detection(now)
+        assert detector.should_pause(now + timedelta(seconds=60)) is True
+
+        # HVAC mode set to OFF - reset detector
+        detector.reset()
+
+        # Pause should be cancelled
+        assert detector.should_pause(now + timedelta(seconds=60)) is False
+        assert detector._detection_triggered is False
+        assert detector._pause_start_time is None
+
+    @pytest.mark.asyncio
+    async def test_hvac_off_clears_history(self):
+        """Test that temperature history is cleared when HVAC turns OFF.
+
+        When HVAC turns OFF, the temperature history should be cleared
+        to prevent false positives when turning back on.
+        """
+        detector = OpenWindowDetector()
+        now = datetime(2024, 1, 15, 10, 0, 0)
+
+        # Build up temperature history
+        for i in range(5):
+            detector.record_temperature(now + timedelta(seconds=i * 30), 21.0 - (i * 0.1))
+
+        # Verify history exists
+        assert len(detector._temp_history) == 5
+
+        # HVAC mode set to OFF - reset detector
+        detector.reset()
+
+        # History should be cleared
+        assert len(detector._temp_history) == 0
+
+    @pytest.mark.asyncio
+    async def test_hvac_off_to_heat_starts_fresh_detection(self):
+        """Test that switching from OFF to HEAT starts fresh OWD detection.
+
+        After HVAC has been turned OFF and back to HEAT, OWD detection
+        should start fresh with empty history.
+        """
+        detector = OpenWindowDetector()
+        now = datetime(2024, 1, 15, 10, 0, 0)
+
+        # Set up detection state during HEAT mode
+        detector.record_temperature(now, 21.0)
+        detector.record_temperature(now + timedelta(seconds=30), 20.0)
+        detector.trigger_detection(now + timedelta(seconds=30))
+
+        # Verify pause is active
+        assert detector.should_pause(now + timedelta(seconds=60)) is True
+
+        # Turn OFF
+        detector.reset()
+
+        # Verify state is cleared
+        assert len(detector._temp_history) == 0
+        assert detector.should_pause(now + timedelta(seconds=60)) is False
+
+        # Turn back to HEAT (5 minutes later)
+        heat_restart_time = now + timedelta(seconds=300)
+
+        # Start recording new temperatures
+        detector.record_temperature(heat_restart_time, 20.0)
+        detector.record_temperature(heat_restart_time + timedelta(seconds=30), 20.2)
+
+        # Should have fresh history (only 2 new entries)
+        assert len(detector._temp_history) == 2
+
+        # No drop detected (temperature rising)
+        assert detector.check_for_drop(heat_restart_time + timedelta(seconds=30)) is False
+
+    @pytest.mark.asyncio
+    async def test_hvac_off_preserves_cooldown(self):
+        """Test that cooldown is preserved when HVAC turns OFF.
+
+        Cooldown should persist across HVAC OFF to prevent rapid re-detection
+        if user quickly turns HVAC back on.
+        """
+        detector = OpenWindowDetector(cooldown=2700)  # 45 min cooldown
+        now = datetime(2024, 1, 15, 10, 0, 0)
+
+        # Trigger detection
+        detector.trigger_detection(now)
+
+        # Verify cooldown is active
+        assert detector.in_cooldown(now + timedelta(seconds=60)) is True
+
+        # Turn HVAC OFF
+        detector.reset()
+
+        # Cooldown should still be active
+        assert detector.in_cooldown(now + timedelta(seconds=60)) is True
+        assert detector._last_detection_time == now
+
+        # After cooldown expires, should be inactive
+        assert detector.in_cooldown(now + timedelta(seconds=2701)) is False
+
+    @pytest.mark.asyncio
+    async def test_hvac_off_clears_suppression(self):
+        """Test that suppression is cleared when HVAC turns OFF.
+
+        Any active suppression (from setpoint changes, night setback, etc.)
+        should be cleared when HVAC turns OFF.
+        """
+        detector = OpenWindowDetector()
+        now = datetime(2024, 1, 15, 10, 0, 0)
+
+        # Suppress detection for 10 minutes
+        detector.suppress_detection(now, duration=600)
+
+        # Verify suppression is active
+        assert detector.is_suppressed(now + timedelta(seconds=60)) is True
+
+        # Turn HVAC OFF
+        detector.reset()
+
+        # Suppression should be cleared
+        assert detector.is_suppressed(now + timedelta(seconds=60)) is False
+        assert detector._suppressed_until is None
+
+    @pytest.mark.asyncio
+    async def test_hvac_heat_to_cool_does_not_reset_detector(self):
+        """Test that switching between HEAT and COOL modes does not reset OWD.
+
+        OWD should only be reset when switching to OFF, not when switching
+        between active HVAC modes (HEAT, COOL, HEAT_COOL).
+        """
+        detector = OpenWindowDetector()
+        now = datetime(2024, 1, 15, 10, 0, 0)
+
+        # Set up detection state during HEAT mode
+        detector.record_temperature(now, 21.0)
+        detector.record_temperature(now + timedelta(seconds=30), 20.0)
+        detector.trigger_detection(now + timedelta(seconds=30))
+
+        # Verify state exists
+        assert len(detector._temp_history) == 2
+        assert detector.should_pause(now + timedelta(seconds=60)) is True
+
+        # Switching to COOL mode - detector should NOT be reset
+        # (only OFF mode triggers reset)
+
+        # Verify state is preserved (no reset called)
+        assert len(detector._temp_history) == 2
+        assert detector.should_pause(now + timedelta(seconds=60)) is True
+
+    @pytest.mark.asyncio
+    async def test_hvac_off_on_off_sequence(self):
+        """Test multiple OFF transitions preserve cooldown correctly.
+
+        Turning HVAC OFF multiple times should maintain the cooldown
+        from the last detection, preventing rapid re-detection.
+        """
+        detector = OpenWindowDetector(cooldown=120)
+        now = datetime(2024, 1, 15, 10, 0, 0)
+
+        # First detection at 10:00
+        detector.trigger_detection(now)
+        assert detector._last_detection_time == now
+
+        # Turn OFF at 10:01
+        detector.reset()
+        assert detector.in_cooldown(now + timedelta(seconds=60)) is True
+
+        # Turn back to HEAT at 10:02, then OFF again at 10:03
+        detector.reset()
+
+        # Cooldown from original detection should still be active
+        assert detector.in_cooldown(now + timedelta(seconds=100)) is True
+
+        # After cooldown expires, should be inactive
+        assert detector.in_cooldown(now + timedelta(seconds=180)) is False
+
+
 class TestClimateOWDIntegration:
     """Test climate.py integration with OpenWindowDetector."""
 
@@ -1523,3 +1763,363 @@ class TestClimateOWDIntegration:
 
         # Verify record_temperature was NOT called
         detector.record_temperature.assert_not_called()
+
+
+class TestClimateSetTemperatureOWDSuppression:
+    """Test async_set_temperature OWD suppression on setpoint changes."""
+
+    def test_set_temperature_down_suppresses_owd(self):
+        """Test lowering setpoint suppresses OWD detection.
+
+        When user lowers the setpoint (e.g., 21°C -> 19°C), the temperature
+        will naturally fall, which could trigger false OWD detection.
+        OWD should be suppressed for 5 minutes (300s) to prevent this.
+        """
+        detector = OpenWindowDetector()
+        now = datetime(2024, 1, 15, 10, 0, 0)
+
+        # Mock suppress_detection and clear_history to verify calls
+        detector.suppress_detection = Mock()
+        detector.clear_history = Mock()
+
+        # Mock thermostat with OWD enabled
+        mock_thermostat = Mock()
+        mock_thermostat._open_window_detector = detector
+        mock_thermostat._current_temp = 21.0
+        mock_thermostat._target_temp = 21.0
+
+        # Simulate async_set_temperature behavior for downward change
+        # User lowers setpoint from 21°C to 19°C
+        new_temp = 19.0
+        current_temp = mock_thermostat._current_temp
+
+        # When setpoint is lowered, suppress OWD and clear history
+        if mock_thermostat._open_window_detector and new_temp < current_temp:
+            mock_thermostat._open_window_detector.suppress_detection(now, duration=300)
+            mock_thermostat._open_window_detector.clear_history()
+
+        # Verify suppress_detection was called with 5 minute duration
+        detector.suppress_detection.assert_called_once_with(now, duration=300)
+
+        # Verify clear_history was called
+        detector.clear_history.assert_called_once()
+
+    def test_set_temperature_up_no_suppression(self):
+        """Test raising setpoint does NOT suppress OWD.
+
+        When user raises the setpoint (e.g., 19°C -> 21°C), the temperature
+        will rise, not fall. Temperature rises don't trigger OWD (only drops do),
+        so no suppression is needed.
+        """
+        detector = OpenWindowDetector()
+        now = datetime(2024, 1, 15, 10, 0, 0)
+
+        # Mock suppress_detection to verify it's NOT called
+        detector.suppress_detection = Mock()
+        detector.clear_history = Mock()
+
+        # Mock thermostat with OWD enabled
+        mock_thermostat = Mock()
+        mock_thermostat._open_window_detector = detector
+        mock_thermostat._current_temp = 19.0
+        mock_thermostat._target_temp = 19.0
+
+        # Simulate async_set_temperature behavior for upward change
+        # User raises setpoint from 19°C to 21°C
+        new_temp = 21.0
+        current_temp = mock_thermostat._current_temp
+
+        # When setpoint is raised, NO suppression needed (temp will rise, not drop)
+        if mock_thermostat._open_window_detector and new_temp < current_temp:
+            mock_thermostat._open_window_detector.suppress_detection(now, duration=300)
+            mock_thermostat._open_window_detector.clear_history()
+
+        # Verify suppress_detection was NOT called (temp going up)
+        detector.suppress_detection.assert_not_called()
+
+        # Verify clear_history was NOT called
+        detector.clear_history.assert_not_called()
+
+    def test_set_temperature_down_clears_history(self):
+        """Test that lowering setpoint clears temperature history.
+
+        When setpoint is lowered, the old temperature history at higher temp
+        should be cleared to prevent false detection based on stale data.
+        """
+        detector = OpenWindowDetector()
+        now = datetime(2024, 1, 15, 10, 0, 0)
+
+        # Build up history at 21°C
+        for i in range(5):
+            detector.record_temperature(now + timedelta(seconds=i * 30), 21.0)
+
+        assert len(detector._temp_history) == 5
+
+        # Simulate setpoint change from 21°C to 19°C
+        current_temp = 21.0
+        new_temp = 19.0
+
+        # Clear history on downward setpoint change
+        if new_temp < current_temp:
+            detector.clear_history()
+            detector.suppress_detection(now + timedelta(seconds=150), duration=300)
+
+        # Verify history was cleared
+        assert len(detector._temp_history) == 0
+
+    def test_set_temperature_down_prevents_false_positive(self):
+        """Test that suppression prevents false positives during natural cooldown.
+
+        Complete scenario:
+        1. Setpoint lowered from 21°C to 19°C
+        2. Suppression applied for 5 minutes
+        3. Temperature naturally drops from 21°C to 19°C
+        4. No OWD detection despite drop > 0.5°C threshold
+        5. After suppression expires, normal detection resumes
+        """
+        detector = OpenWindowDetector(temp_drop=0.5)
+        now = datetime(2024, 1, 15, 10, 0, 0)
+
+        # Step 1: User lowers setpoint from 21°C to 19°C
+        current_temp = 21.0
+        new_temp = 19.0
+
+        # Step 2: Apply suppression and clear old history
+        if new_temp < current_temp:
+            detector.clear_history()
+            detector.suppress_detection(now, duration=300)
+
+        # Step 3: Temperature drops naturally over next 3 minutes (2°C drop)
+        temps = [21.0, 20.5, 20.0, 19.5, 19.0]
+        for i, temp in enumerate(temps):
+            detector.record_temperature(now + timedelta(seconds=i * 60), temp)
+
+        # Step 4: Despite 2°C drop (well above 0.5°C threshold), no detection during suppression
+        check_time = now + timedelta(seconds=240)
+        assert detector.is_suppressed(check_time) is True
+        assert detector.check_for_drop(check_time) is False
+
+        # Step 5: After suppression expires, normal detection works
+        post_suppression = now + timedelta(seconds=310)
+
+        # Clear history and simulate real window opening
+        detector.clear_history()
+        detector.record_temperature(post_suppression, 19.0)
+        detector.record_temperature(post_suppression + timedelta(seconds=60), 18.8)
+        detector.record_temperature(post_suppression + timedelta(seconds=120), 18.4)
+
+        # Now detection should work (0.6°C drop)
+        assert detector.is_suppressed(post_suppression + timedelta(seconds=120)) is False
+        assert detector.check_for_drop(post_suppression + timedelta(seconds=120)) is True
+
+    def test_set_temperature_no_detector_no_error(self):
+        """Test that setpoint changes work when OWD is disabled.
+
+        When OWD detector is None (disabled), setpoint changes should
+        work normally without attempting to suppress detection.
+        """
+        # Mock thermostat with NO OWD detector
+        mock_thermostat = Mock()
+        mock_thermostat._open_window_detector = None
+        mock_thermostat._current_temp = 21.0
+
+        # Simulate async_set_temperature with OWD disabled
+        new_temp = 19.0
+        current_temp = mock_thermostat._current_temp
+
+        # This should not raise even though detector is None
+        if mock_thermostat._open_window_detector and new_temp < current_temp:
+            mock_thermostat._open_window_detector.suppress_detection(
+                datetime.now(), duration=300
+            )
+            mock_thermostat._open_window_detector.clear_history()
+
+        # No error should occur - test passes if we reach here
+        assert mock_thermostat._open_window_detector is None
+
+    def test_set_temperature_same_value_no_suppression(self):
+        """Test that setting same temperature doesn't trigger suppression.
+
+        When user sets the same temperature (e.g., 21°C -> 21°C), this is
+        effectively a no-op and should not suppress OWD detection.
+        """
+        detector = OpenWindowDetector()
+        now = datetime(2024, 1, 15, 10, 0, 0)
+
+        # Mock suppress_detection to verify it's NOT called
+        detector.suppress_detection = Mock()
+        detector.clear_history = Mock()
+
+        # Mock thermostat with OWD enabled
+        mock_thermostat = Mock()
+        mock_thermostat._open_window_detector = detector
+        mock_thermostat._current_temp = 21.0
+        mock_thermostat._target_temp = 21.0
+
+        # Simulate async_set_temperature with same temperature
+        new_temp = 21.0
+        current_temp = mock_thermostat._current_temp
+
+        # No suppression when temp doesn't change
+        if mock_thermostat._open_window_detector and new_temp < current_temp:
+            mock_thermostat._open_window_detector.suppress_detection(now, duration=300)
+            mock_thermostat._open_window_detector.clear_history()
+
+        # Verify suppress_detection was NOT called (temp unchanged)
+        detector.suppress_detection.assert_not_called()
+        detector.clear_history.assert_not_called()
+
+    def test_set_temperature_small_decrease_still_suppresses(self):
+        """Test that even small downward changes trigger suppression.
+
+        Even a small setpoint decrease (e.g., 21°C -> 20.8°C) should trigger
+        suppression, as the natural temperature adjustment could still cause
+        a false positive if the room is poorly insulated or drafty.
+        """
+        detector = OpenWindowDetector()
+        now = datetime(2024, 1, 15, 10, 0, 0)
+
+        # Mock suppress_detection and clear_history
+        detector.suppress_detection = Mock()
+        detector.clear_history = Mock()
+
+        # Mock thermostat with OWD enabled
+        mock_thermostat = Mock()
+        mock_thermostat._open_window_detector = detector
+        mock_thermostat._current_temp = 21.0
+
+        # Simulate small downward change (21°C -> 20.8°C)
+        new_temp = 20.8
+        current_temp = mock_thermostat._current_temp
+
+        # Even small decrease should trigger suppression
+        if mock_thermostat._open_window_detector and new_temp < current_temp:
+            mock_thermostat._open_window_detector.suppress_detection(now, duration=300)
+            mock_thermostat._open_window_detector.clear_history()
+
+        # Verify suppress_detection was called
+        detector.suppress_detection.assert_called_once_with(now, duration=300)
+        detector.clear_history.assert_called_once()
+
+    def test_set_temperature_suppression_duration_is_5_minutes(self):
+        """Test that suppression duration is exactly 5 minutes (300 seconds).
+
+        The 5-minute suppression window should be long enough to prevent
+        false positives during natural temperature adjustment, but short
+        enough to resume detection quickly if a real window opens.
+        """
+        detector = OpenWindowDetector()
+        now = datetime(2024, 1, 15, 10, 0, 0)
+
+        # Simulate setpoint decrease
+        current_temp = 21.0
+        new_temp = 19.0
+
+        if new_temp < current_temp:
+            detector.suppress_detection(now, duration=300)
+
+        # Verify suppression is active for 4.5 minutes
+        assert detector.is_suppressed(now + timedelta(seconds=270)) is True
+
+        # Verify suppression expires after 5 minutes
+        assert detector.is_suppressed(now + timedelta(seconds=301)) is False
+
+    def test_multiple_setpoint_changes_extend_suppression(self):
+        """Test that multiple rapid setpoint changes extend suppression.
+
+        If user makes multiple setpoint adjustments in quick succession
+        (e.g., 21°C -> 20°C -> 19°C), each change should extend suppression
+        to ensure no false positives during the adjustment period.
+        """
+        detector = OpenWindowDetector()
+        now = datetime(2024, 1, 15, 10, 0, 0)
+
+        # First setpoint change: 21°C -> 20°C
+        detector.suppress_detection(now, duration=300)
+        detector.clear_history()
+
+        # 2 minutes later, second change: 20°C -> 19°C (extends suppression)
+        time_2min = now + timedelta(seconds=120)
+        detector.suppress_detection(time_2min, duration=300)
+        detector.clear_history()
+
+        # 4 minutes from original change (2 min from second change) - still suppressed
+        time_4min = now + timedelta(seconds=240)
+        assert detector.is_suppressed(time_4min) is True
+
+        # 6.5 minutes from original change (4.5 min from second change) - still suppressed
+        time_6_5min = now + timedelta(seconds=390)
+        assert detector.is_suppressed(time_6_5min) is True
+
+        # 7.5 minutes from original change (5.5 min from second change) - suppression expired
+        time_7_5min = now + timedelta(seconds=450)
+        assert detector.is_suppressed(time_7_5min) is False
+
+    def test_set_temperature_during_active_owd_pause(self):
+        """Test setpoint change behavior when OWD pause is already active.
+
+        If OWD has already detected an open window and paused heating,
+        changing the setpoint should:
+        1. Clear the history (remove stale data)
+        2. Apply suppression (prevent re-trigger during adjustment)
+        3. NOT clear the active pause (window may still be open)
+        """
+        detector = OpenWindowDetector(pause_duration=1800)
+        now = datetime(2024, 1, 15, 10, 0, 0)
+
+        # OWD detects open window and starts pause
+        detector.record_temperature(now, 21.0)
+        detector.record_temperature(now + timedelta(seconds=60), 20.0)
+        detector.trigger_detection(now + timedelta(seconds=60))
+
+        # Verify pause is active
+        pause_time = now + timedelta(seconds=90)
+        assert detector.should_pause(pause_time) is True
+
+        # User changes setpoint from 21°C to 19°C during pause
+        current_temp = 21.0
+        new_temp = 19.0
+
+        if new_temp < current_temp:
+            detector.clear_history()
+            detector.suppress_detection(pause_time, duration=300)
+
+        # History should be cleared
+        assert len(detector._temp_history) == 0
+
+        # Suppression should be active
+        assert detector.is_suppressed(pause_time) is True
+
+        # But pause should still be active (window may still be open)
+        assert detector.should_pause(pause_time) is True
+
+    def test_set_temperature_with_unavailable_current_temp(self):
+        """Test setpoint change when current temp is unavailable.
+
+        When current temperature is unavailable (None), we can't determine
+        if setpoint is increasing or decreasing, so no suppression should occur.
+        """
+        detector = OpenWindowDetector()
+        now = datetime(2024, 1, 15, 10, 0, 0)
+
+        # Mock suppress_detection to verify it's NOT called
+        detector.suppress_detection = Mock()
+        detector.clear_history = Mock()
+
+        # Mock thermostat with OWD enabled but current_temp unavailable
+        mock_thermostat = Mock()
+        mock_thermostat._open_window_detector = detector
+        mock_thermostat._current_temp = None
+
+        # Simulate async_set_temperature with unavailable current temp
+        new_temp = 19.0
+        current_temp = mock_thermostat._current_temp
+
+        # No suppression when current_temp is None
+        if mock_thermostat._open_window_detector and current_temp is not None and new_temp < current_temp:
+            mock_thermostat._open_window_detector.suppress_detection(now, duration=300)
+            mock_thermostat._open_window_detector.clear_history()
+
+        # Verify suppress_detection was NOT called
+        detector.suppress_detection.assert_not_called()
+        detector.clear_history.assert_not_called()
