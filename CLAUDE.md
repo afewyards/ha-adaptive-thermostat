@@ -52,6 +52,7 @@ pytest --cov=custom_components/adaptive_thermostat  # with coverage
 | `thermal_groups.py` | Inter-zone heat transfer coordination |
 | `night_setback.py` | Scheduled temp reduction |
 | `contact_sensors.py` | Pauses on window/door open |
+| `open_window_detection.py` | Algorithmic open window detection |
 | `heating_curves.py` | Outdoor temp compensation |
 
 ### Data Flow
@@ -141,6 +142,24 @@ thermal_groups:
     delay_minutes: 15
 ```
 
+### Open Window Detection
+
+Algorithmic detection of open windows based on rapid temperature drops (Danfoss Ally algorithm). Module: `adaptive/open_window_detection.py` (`OpenWindowDetector`).
+
+**Configuration:**
+- **Domain:** `open_window_detection:` block with `temp_drop` (°C), `detection_window` (min), `pause_duration` (min), `cooldown` (min), `action` (pause/notify)
+- **Entity:** Can disable with `open_window_detection: false`
+- **Precedence:** Contact sensors > entity config > domain config > defaults
+
+**Detection algorithm:** Ring buffer tracks temps over `detection_window`. Triggers when `oldest - current >= temp_drop`.
+
+**Integration:**
+- `_async_update_temp` feeds detector
+- `_async_control_heating` checks pause state
+- Suppression on setpoint decrease and night setback transitions
+
+**State attributes:** `open_window_detection_active`, `open_window_cooldown_remaining`
+
 ### Persistence
 
 `LearningDataStore` in `adaptive/persistence.py`. Zone-keyed JSON (v4 format). 30s debounce on saves. Migrations: v2→v3→v4 automatic.
@@ -166,3 +185,4 @@ thermal_groups:
 | `test_thermal_groups.py` | Thermal group coordination |
 | `test_night_setback.py` | Schedule/sunrise |
 | `test_contact_sensors.py` | Window/door |
+| `test_open_window_detection.py` | Algorithmic window detection |

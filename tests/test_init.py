@@ -68,6 +68,20 @@ from custom_components.adaptive_thermostat.const import (
     DEFAULT_WINDOW_RATING,
     DEFAULT_PERSISTENT_NOTIFICATION,
     VALID_ENERGY_RATINGS,
+    CONF_OPEN_WINDOW_DETECTION,
+    CONF_OWD_TEMP_DROP,
+    CONF_OWD_DETECTION_WINDOW,
+    CONF_OWD_PAUSE_DURATION,
+    CONF_OWD_COOLDOWN,
+    CONF_OWD_ACTION,
+    DEFAULT_OWD_TEMP_DROP,
+    DEFAULT_OWD_DETECTION_WINDOW,
+    DEFAULT_OWD_PAUSE_DURATION,
+    DEFAULT_OWD_COOLDOWN,
+    DEFAULT_OWD_ACTION,
+    OWD_ACTION_PAUSE,
+    OWD_ACTION_FROST,
+    VALID_OWD_ACTIONS,
 )
 
 
@@ -109,6 +123,30 @@ def create_test_schema():
         if not isinstance(value, str):
             raise vol.Invalid("Expected string")
         return value
+
+    # Open Window Detection schema
+    OPEN_WINDOW_DETECTION_SCHEMA = vol.Schema({
+        vol.Optional(CONF_OWD_TEMP_DROP, default=DEFAULT_OWD_TEMP_DROP): vol.All(
+            vol.Coerce(float),
+            vol.Range(min=0.1, max=5.0, msg="temp_drop must be between 0.1 and 5.0°C")
+        ),
+        vol.Optional(CONF_OWD_DETECTION_WINDOW, default=DEFAULT_OWD_DETECTION_WINDOW): vol.All(
+            vol.Coerce(int),
+            vol.Range(min=60, max=600, msg="detection_window must be between 60 and 600 seconds")
+        ),
+        vol.Optional(CONF_OWD_PAUSE_DURATION, default=DEFAULT_OWD_PAUSE_DURATION): vol.All(
+            vol.Coerce(int),
+            vol.Range(min=300, max=7200, msg="pause_duration must be between 300 and 7200 seconds")
+        ),
+        vol.Optional(CONF_OWD_COOLDOWN, default=DEFAULT_OWD_COOLDOWN): vol.All(
+            vol.Coerce(int),
+            vol.Range(min=0, max=10800, msg="cooldown must be between 0 and 10800 seconds")
+        ),
+        vol.Optional(CONF_OWD_ACTION, default=DEFAULT_OWD_ACTION): vol.In(
+            VALID_OWD_ACTIONS,
+            msg="action must be 'pause' or 'frost_protection'"
+        ),
+    })
 
     return vol.Schema(
         {
@@ -185,6 +223,9 @@ def create_test_schema():
                         msg="fallback_flow_rate must be between 0.01 and 10.0 L/s"
                     )
                 ),
+
+                # Open Window Detection
+                vol.Optional(CONF_OPEN_WINDOW_DETECTION): OPEN_WINDOW_DETECTION_SCHEMA,
             })
         },
         extra=vol.ALLOW_EXTRA,
@@ -558,6 +599,186 @@ class TestTypeCoercion:
         config = {DOMAIN: {CONF_FALLBACK_FLOW_RATE: "2.5"}}
         result = schema(config)
         assert result[DOMAIN][CONF_FALLBACK_FLOW_RATE] == pytest.approx(2.5)
+
+
+# =============================================================================
+# Test Open Window Detection Schema
+# =============================================================================
+
+
+class TestOpenWindowDetectionSchema:
+    """Tests for Open Window Detection domain schema validation."""
+
+    def test_domain_schema_accepts_owd_config(self):
+        """Test that valid OWD config passes validation."""
+        schema = create_test_schema()
+        config = {
+            DOMAIN: {
+                CONF_OPEN_WINDOW_DETECTION: {
+                    CONF_OWD_TEMP_DROP: 0.5,
+                    CONF_OWD_DETECTION_WINDOW: 180,
+                    CONF_OWD_PAUSE_DURATION: 1800,
+                    CONF_OWD_COOLDOWN: 2700,
+                    CONF_OWD_ACTION: "pause",
+                }
+            }
+        }
+        result = schema(config)
+        assert DOMAIN in result
+        owd_config = result[DOMAIN][CONF_OPEN_WINDOW_DETECTION]
+        assert owd_config[CONF_OWD_TEMP_DROP] == 0.5
+        assert owd_config[CONF_OWD_DETECTION_WINDOW] == 180
+        assert owd_config[CONF_OWD_PAUSE_DURATION] == 1800
+        assert owd_config[CONF_OWD_COOLDOWN] == 2700
+        assert owd_config[CONF_OWD_ACTION] == "pause"
+
+    def test_domain_schema_owd_all_optional(self):
+        """Test that empty OWD config is valid and applies defaults."""
+        schema = create_test_schema()
+        config = {DOMAIN: {CONF_OPEN_WINDOW_DETECTION: {}}}
+        result = schema(config)
+        owd_config = result[DOMAIN][CONF_OPEN_WINDOW_DETECTION]
+        # Check defaults are applied
+        assert owd_config[CONF_OWD_TEMP_DROP] == DEFAULT_OWD_TEMP_DROP
+        assert owd_config[CONF_OWD_DETECTION_WINDOW] == DEFAULT_OWD_DETECTION_WINDOW
+        assert owd_config[CONF_OWD_PAUSE_DURATION] == DEFAULT_OWD_PAUSE_DURATION
+        assert owd_config[CONF_OWD_COOLDOWN] == DEFAULT_OWD_COOLDOWN
+        assert owd_config[CONF_OWD_ACTION] == DEFAULT_OWD_ACTION
+
+    def test_domain_schema_owd_validates_temp_drop(self):
+        """Test that temp_drop must be positive float."""
+        schema = create_test_schema()
+
+        # Test negative value
+        config = {DOMAIN: {CONF_OPEN_WINDOW_DETECTION: {CONF_OWD_TEMP_DROP: -0.5}}}
+        with pytest.raises(vol.Invalid) as exc_info:
+            schema(config)
+        assert "0.1" in str(exc_info.value) or "range" in str(exc_info.value).lower()
+
+        # Test zero
+        config = {DOMAIN: {CONF_OPEN_WINDOW_DETECTION: {CONF_OWD_TEMP_DROP: 0.0}}}
+        with pytest.raises(vol.Invalid) as exc_info:
+            schema(config)
+        assert "0.1" in str(exc_info.value) or "range" in str(exc_info.value).lower()
+
+        # Test too high
+        config = {DOMAIN: {CONF_OPEN_WINDOW_DETECTION: {CONF_OWD_TEMP_DROP: 10.0}}}
+        with pytest.raises(vol.Invalid) as exc_info:
+            schema(config)
+        assert "5.0" in str(exc_info.value) or "range" in str(exc_info.value).lower()
+
+    def test_domain_schema_owd_validates_action(self):
+        """Test that action must be 'pause' or 'frost_protection'."""
+        schema = create_test_schema()
+
+        # Valid actions
+        for action in VALID_OWD_ACTIONS:
+            config = {DOMAIN: {CONF_OPEN_WINDOW_DETECTION: {CONF_OWD_ACTION: action}}}
+            result = schema(config)
+            assert result[DOMAIN][CONF_OPEN_WINDOW_DETECTION][CONF_OWD_ACTION] == action
+
+        # Invalid action
+        config = {DOMAIN: {CONF_OPEN_WINDOW_DETECTION: {CONF_OWD_ACTION: "invalid"}}}
+        with pytest.raises(vol.Invalid) as exc_info:
+            schema(config)
+        error_msg = str(exc_info.value)
+        assert OWD_ACTION_PAUSE in error_msg or OWD_ACTION_FROST in error_msg
+
+    def test_domain_schema_without_owd(self):
+        """Test that config without OWD section is valid."""
+        schema = create_test_schema()
+        config = {
+            DOMAIN: {
+                CONF_NOTIFY_SERVICE: "mobile_app",
+                CONF_SYNC_MODES: True,
+            }
+        }
+        result = schema(config)
+        assert DOMAIN in result
+        assert CONF_OPEN_WINDOW_DETECTION not in result[DOMAIN]
+
+    def test_domain_schema_owd_validates_detection_window(self):
+        """Test that detection_window is within valid range."""
+        schema = create_test_schema()
+
+        # Test too low
+        config = {DOMAIN: {CONF_OPEN_WINDOW_DETECTION: {CONF_OWD_DETECTION_WINDOW: 30}}}
+        with pytest.raises(vol.Invalid) as exc_info:
+            schema(config)
+        assert "60" in str(exc_info.value) or "range" in str(exc_info.value).lower()
+
+        # Test too high
+        config = {DOMAIN: {CONF_OPEN_WINDOW_DETECTION: {CONF_OWD_DETECTION_WINDOW: 1000}}}
+        with pytest.raises(vol.Invalid) as exc_info:
+            schema(config)
+        assert "600" in str(exc_info.value) or "range" in str(exc_info.value).lower()
+
+        # Test valid values
+        for window in [60, 180, 300, 600]:
+            config = {DOMAIN: {CONF_OPEN_WINDOW_DETECTION: {CONF_OWD_DETECTION_WINDOW: window}}}
+            result = schema(config)
+            assert result[DOMAIN][CONF_OPEN_WINDOW_DETECTION][CONF_OWD_DETECTION_WINDOW] == window
+
+    def test_domain_schema_owd_validates_pause_duration(self):
+        """Test that pause_duration is within valid range."""
+        schema = create_test_schema()
+
+        # Test too low
+        config = {DOMAIN: {CONF_OPEN_WINDOW_DETECTION: {CONF_OWD_PAUSE_DURATION: 60}}}
+        with pytest.raises(vol.Invalid) as exc_info:
+            schema(config)
+        assert "300" in str(exc_info.value) or "range" in str(exc_info.value).lower()
+
+        # Test too high
+        config = {DOMAIN: {CONF_OPEN_WINDOW_DETECTION: {CONF_OWD_PAUSE_DURATION: 10000}}}
+        with pytest.raises(vol.Invalid) as exc_info:
+            schema(config)
+        assert "7200" in str(exc_info.value) or "range" in str(exc_info.value).lower()
+
+    def test_domain_schema_owd_validates_cooldown(self):
+        """Test that cooldown is within valid range."""
+        schema = create_test_schema()
+
+        # Test negative
+        config = {DOMAIN: {CONF_OPEN_WINDOW_DETECTION: {CONF_OWD_COOLDOWN: -100}}}
+        with pytest.raises(vol.Invalid) as exc_info:
+            schema(config)
+        assert "0" in str(exc_info.value) or "range" in str(exc_info.value).lower()
+
+        # Test too high
+        config = {DOMAIN: {CONF_OPEN_WINDOW_DETECTION: {CONF_OWD_COOLDOWN: 20000}}}
+        with pytest.raises(vol.Invalid) as exc_info:
+            schema(config)
+        assert "10800" in str(exc_info.value) or "range" in str(exc_info.value).lower()
+
+        # Test zero is valid
+        config = {DOMAIN: {CONF_OPEN_WINDOW_DETECTION: {CONF_OWD_COOLDOWN: 0}}}
+        result = schema(config)
+        assert result[DOMAIN][CONF_OPEN_WINDOW_DETECTION][CONF_OWD_COOLDOWN] == 0
+
+    def test_domain_schema_owd_type_coercion(self):
+        """Test that OWD config values are coerced to correct types."""
+        schema = create_test_schema()
+        config = {
+            DOMAIN: {
+                CONF_OPEN_WINDOW_DETECTION: {
+                    CONF_OWD_TEMP_DROP: "0.8",  # String to float
+                    CONF_OWD_DETECTION_WINDOW: "240",  # String to int
+                    CONF_OWD_PAUSE_DURATION: 1200,  # Int stays int
+                    CONF_OWD_COOLDOWN: "3600",  # String to int
+                }
+            }
+        }
+        result = schema(config)
+        owd_config = result[DOMAIN][CONF_OPEN_WINDOW_DETECTION]
+        assert owd_config[CONF_OWD_TEMP_DROP] == pytest.approx(0.8)
+        assert isinstance(owd_config[CONF_OWD_TEMP_DROP], float)
+        assert owd_config[CONF_OWD_DETECTION_WINDOW] == 240
+        assert isinstance(owd_config[CONF_OWD_DETECTION_WINDOW], int)
+        assert owd_config[CONF_OWD_PAUSE_DURATION] == 1200
+        assert isinstance(owd_config[CONF_OWD_PAUSE_DURATION], int)
+        assert owd_config[CONF_OWD_COOLDOWN] == 3600
+        assert isinstance(owd_config[CONF_OWD_COOLDOWN], int)
 
 
 # =============================================================================

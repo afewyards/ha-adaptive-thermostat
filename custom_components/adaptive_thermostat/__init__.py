@@ -61,6 +61,19 @@ from .const import (
     CONF_PRESET_SYNC_MODE,
     CONF_BOOST_PID_OFF,
     CONF_THERMAL_GROUPS,
+    # Open Window Detection
+    CONF_OPEN_WINDOW_DETECTION,
+    CONF_OWD_TEMP_DROP,
+    CONF_OWD_DETECTION_WINDOW,
+    CONF_OWD_PAUSE_DURATION,
+    CONF_OWD_COOLDOWN,
+    CONF_OWD_ACTION,
+    DEFAULT_OWD_TEMP_DROP,
+    DEFAULT_OWD_DETECTION_WINDOW,
+    DEFAULT_OWD_PAUSE_DURATION,
+    DEFAULT_OWD_COOLDOWN,
+    DEFAULT_OWD_ACTION,
+    VALID_OWD_ACTIONS,
     # Climate settings (domain-level defaults with per-entity override)
     CONF_MIN_TEMP,
     CONF_MAX_TEMP,
@@ -151,6 +164,30 @@ def valid_notify_service(value: Any) -> str:
 # Domain configuration schema
 # This validates the configuration under the adaptive_thermostat: key
 if HAS_HOMEASSISTANT:
+    # Open Window Detection schema
+    OPEN_WINDOW_DETECTION_SCHEMA = vol.Schema({
+        vol.Optional(CONF_OWD_TEMP_DROP, default=DEFAULT_OWD_TEMP_DROP): vol.All(
+            vol.Coerce(float),
+            vol.Range(min=0.1, max=5.0, msg="temp_drop must be between 0.1 and 5.0°C")
+        ),
+        vol.Optional(CONF_OWD_DETECTION_WINDOW, default=DEFAULT_OWD_DETECTION_WINDOW): vol.All(
+            vol.Coerce(int),
+            vol.Range(min=60, max=600, msg="detection_window must be between 60 and 600 seconds")
+        ),
+        vol.Optional(CONF_OWD_PAUSE_DURATION, default=DEFAULT_OWD_PAUSE_DURATION): vol.All(
+            vol.Coerce(int),
+            vol.Range(min=300, max=7200, msg="pause_duration must be between 300 and 7200 seconds")
+        ),
+        vol.Optional(CONF_OWD_COOLDOWN, default=DEFAULT_OWD_COOLDOWN): vol.All(
+            vol.Coerce(int),
+            vol.Range(min=0, max=10800, msg="cooldown must be between 0 and 10800 seconds")
+        ),
+        vol.Optional(CONF_OWD_ACTION, default=DEFAULT_OWD_ACTION): vol.In(
+            VALID_OWD_ACTIONS,
+            msg="action must be 'pause' or 'frost_protection'"
+        ),
+    })
+
     # Thermal group schema
     THERMAL_GROUP_SCHEMA = vol.Schema({
         vol.Required("name"): cv.string,
@@ -288,6 +325,9 @@ if HAS_HOMEASSISTANT:
                     cv.ensure_list,
                     [THERMAL_GROUP_SCHEMA]
                 ),
+
+                # Open Window Detection
+                vol.Optional(CONF_OPEN_WINDOW_DETECTION): OPEN_WINDOW_DETECTION_SCHEMA,
             })
         },
         extra=vol.ALLOW_EXTRA,  # Allow other domains in config
@@ -295,6 +335,7 @@ if HAS_HOMEASSISTANT:
 else:
     # Provide stub for testing without Home Assistant
     CONFIG_SCHEMA = None
+    OPEN_WINDOW_DETECTION_SCHEMA = None
     THERMAL_GROUP_SCHEMA = None
 
 

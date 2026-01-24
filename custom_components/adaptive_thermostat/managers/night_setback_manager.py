@@ -42,6 +42,7 @@ class NightSetbackController:
         window_orientation: Optional[str],
         get_target_temp: Callable[[], Optional[float]],
         get_current_temp: Callable[[], Optional[float]],
+        get_open_window_detector: Optional[Callable[[], Optional[Any]]] = None,
     ):
         """Initialize the NightSetbackController.
 
@@ -54,8 +55,10 @@ class NightSetbackController:
             window_orientation: Window orientation for solar calculations
             get_target_temp: Callback to get current target temperature
             get_current_temp: Callback to get current temperature
+            get_open_window_detector: Callback to get the OpenWindowDetector instance (optional)
         """
         self._entity_id = entity_id
+        self._get_open_window_detector = get_open_window_detector
 
         # Initialize the calculator for pure calculation logic
         self._calculator = NightSetbackCalculator(
@@ -135,6 +138,18 @@ class NightSetbackController:
                 transition = "started" if in_night_period else "ended"
                 _LOGGER.info("%s: Night setback %s - setting learning grace period", self._entity_id, transition)
                 self.set_learning_grace_period(minutes=60)
+
+                # Suppress OWD during night setback activation to prevent false positives
+                # When setback activates, temp drops naturally - suppress for 5 minutes
+                if in_night_period and self._get_open_window_detector:
+                    detector = self._get_open_window_detector()
+                    if detector:
+                        now = current_time if current_time else datetime.now()
+                        detector.suppress_detection(now, duration=300)
+                        _LOGGER.info(
+                            "%s: Suppressing OWD for 5 minutes during night setback activation",
+                            self._entity_id
+                        )
             self._night_setback_was_active = in_night_period
 
         return effective_target, in_night_period, info

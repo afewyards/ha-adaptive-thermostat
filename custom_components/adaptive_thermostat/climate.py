@@ -48,6 +48,7 @@ from .adaptive.night_setback import NightSetback
 from .adaptive.sun_position import SunPositionCalculator
 from .adaptive.contact_sensors import ContactSensorHandler, ContactAction
 from .adaptive.ke_learning import KeLearner
+from .adaptive.open_window_detection import OpenWindowDetector
 
 from homeassistant.components.climate import PLATFORM_SCHEMA, ClimateEntity, ClimateEntityFeature
 from homeassistant.components.climate import (
@@ -145,6 +146,29 @@ PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend(
         vol.Optional(const.CONF_CONTACT_SENSORS): cv.entity_ids,
         vol.Optional(const.CONF_CONTACT_ACTION, default=const.CONTACT_ACTION_PAUSE): vol.In(const.VALID_CONTACT_ACTIONS),
         vol.Optional(const.CONF_CONTACT_DELAY, default=const.DEFAULT_CONTACT_DELAY): vol.Coerce(int),
+        # Open window detection
+        vol.Optional(const.CONF_OPEN_WINDOW_DETECTION): vol.Any(
+            cv.boolean,
+            vol.Schema({
+                vol.Optional(const.CONF_OWD_TEMP_DROP, default=const.DEFAULT_OWD_TEMP_DROP): vol.All(
+                    vol.Coerce(float),
+                    vol.Range(min=0.1, max=5.0)
+                ),
+                vol.Optional(const.CONF_OWD_DETECTION_WINDOW, default=const.DEFAULT_OWD_DETECTION_WINDOW): vol.All(
+                    vol.Coerce(int),
+                    vol.Range(min=60, max=600)
+                ),
+                vol.Optional(const.CONF_OWD_PAUSE_DURATION, default=const.DEFAULT_OWD_PAUSE_DURATION): vol.All(
+                    vol.Coerce(int),
+                    vol.Range(min=300, max=7200)
+                ),
+                vol.Optional(const.CONF_OWD_COOLDOWN, default=const.DEFAULT_OWD_COOLDOWN): vol.All(
+                    vol.Coerce(int),
+                    vol.Range(min=600, max=10800)
+                ),
+                vol.Optional(const.CONF_OWD_ACTION, default=const.DEFAULT_OWD_ACTION): vol.In(const.VALID_CONTACT_ACTIONS),
+            })
+        ),
         # Night setback
         vol.Optional(const.CONF_NIGHT_SETBACK): vol.Schema({
             vol.Optional(const.CONF_NIGHT_SETBACK_START): cv.string,
@@ -213,6 +237,49 @@ def validate_pwm_compatibility(config):
             )
 
     return config
+
+
+def merge_owd_config(entity_config, domain_config, has_contact_sensors) -> dict | None:
+    """Merge OWD config with precedence: contact_sensors > entity > domain > defaults.
+
+    Args:
+        entity_config: Entity-level OWD config (bool, dict, or None)
+        domain_config: Domain-level OWD config dict or None
+        has_contact_sensors: Whether entity has contact_sensors configured
+
+    Returns:
+        dict: Merged OWD config with all values, or None if OWD should be disabled
+    """
+    # Rule 1: Contact sensors disable OWD
+    if has_contact_sensors:
+        return None
+
+    # Rule 2: Entity explicitly disables OWD
+    if entity_config is False:
+        return None
+
+    # Start with built-in defaults
+    merged = {
+        const.CONF_OWD_TEMP_DROP: const.DEFAULT_OWD_TEMP_DROP,
+        const.CONF_OWD_DETECTION_WINDOW: const.DEFAULT_OWD_DETECTION_WINDOW,
+        const.CONF_OWD_PAUSE_DURATION: const.DEFAULT_OWD_PAUSE_DURATION,
+        const.CONF_OWD_COOLDOWN: const.DEFAULT_OWD_COOLDOWN,
+        const.CONF_OWD_ACTION: const.DEFAULT_OWD_ACTION,
+    }
+
+    # Apply domain config
+    if domain_config and isinstance(domain_config, dict):
+        for key, value in domain_config.items():
+            if key in merged:
+                merged[key] = value
+
+    # Apply entity config (overrides domain)
+    if entity_config and isinstance(entity_config, dict):
+        for key, value in entity_config.items():
+            if key in merged:
+                merged[key] = value
+
+    return merged
 
 
 async def async_setup_platform(hass, config, async_add_entities, discovery_info=None):
@@ -318,6 +385,11 @@ async def async_setup_platform(hass, config, async_add_entities, discovery_info=
         'contact_sensors': config.get(const.CONF_CONTACT_SENSORS),
         'contact_action': config.get(const.CONF_CONTACT_ACTION),
         'contact_delay': config.get(const.CONF_CONTACT_DELAY),
+        'owd_config': merge_owd_config(
+            entity_config=config.get(const.CONF_OPEN_WINDOW_DETECTION),
+            domain_config=hass.data.get(DOMAIN, {}).get(const.CONF_OPEN_WINDOW_DETECTION),
+            has_contact_sensors=bool(config.get(const.CONF_CONTACT_SENSORS))
+        ),
         'night_setback_config': config.get(const.CONF_NIGHT_SETBACK),
         'floor_construction': config.get(const.CONF_FLOOR_CONSTRUCTION),
         'max_power_w': config.get(const.CONF_MAX_POWER_W),
@@ -577,6 +649,26 @@ class AdaptiveThermostat(ClimateEntity, RestoreEntity, ABC):
                 self._name, contact_sensors, contact_action, contact_delay
             )
 
+        # Open window detection (temperature-based detection)
+        self._open_window_detector = None
+        owd_config = kwargs.get('owd_config')
+        if owd_config:
+            self._open_window_detector = OpenWindowDetector(
+                temp_drop_threshold=owd_config[const.CONF_OWD_TEMP_DROP],
+                detection_window_seconds=owd_config[const.CONF_OWD_DETECTION_WINDOW],
+                pause_duration_seconds=owd_config[const.CONF_OWD_PAUSE_DURATION],
+                cooldown_seconds=owd_config[const.CONF_OWD_COOLDOWN],
+            )
+            _LOGGER.info(
+                "%s: Open window detection configured: temp_drop=%.1f°C, window=%ds, pause=%ds, cooldown=%ds, action=%s",
+                self._name,
+                owd_config[const.CONF_OWD_TEMP_DROP],
+                owd_config[const.CONF_OWD_DETECTION_WINDOW],
+                owd_config[const.CONF_OWD_PAUSE_DURATION],
+                owd_config[const.CONF_OWD_COOLDOWN],
+                owd_config[const.CONF_OWD_ACTION],
+            )
+
         # Heater controller (initialized in async_added_to_hass when hass is available)
         self._heater_controller: HeaterController | None = None
 
@@ -732,6 +824,7 @@ class AdaptiveThermostat(ClimateEntity, RestoreEntity, ABC):
                 window_orientation=self._window_orientation,
                 get_target_temp=lambda: self._target_temp,
                 get_current_temp=lambda: self._current_temp,
+                get_open_window_detector=lambda: self._open_window_detector,
             )
             _LOGGER.info(
                 "%s: Night setback controller initialized",
@@ -1501,6 +1594,10 @@ class AdaptiveThermostat(ClimateEntity, RestoreEntity, ABC):
             # Reset PID calc timing to avoid stale dt when turned back on
             if self._control_output_manager is not None:
                 self._control_output_manager.reset_calc_timing()
+            # Reset OWD detector to clear history and pause state
+            if self._open_window_detector is not None:
+                _LOGGER.info("%s: Resetting OWD detector due to HVAC OFF", self.entity_id)
+                self._open_window_detector.reset()
         else:
             _LOGGER.error("%s: Unrecognized HVAC mode: %s", self.entity_id, hvac_mode)
             return
@@ -1543,6 +1640,18 @@ class AdaptiveThermostat(ClimateEntity, RestoreEntity, ABC):
         temperature = kwargs.get(ATTR_TEMPERATURE)
         if temperature is None:
             return
+
+        # Suppress OWD if setpoint is being lowered
+        if self._open_window_detector and self._target_temp is not None:
+            if temperature < self._target_temp:
+                now = datetime.now()
+                self._open_window_detector.suppress_detection(now, duration=300)
+                self._open_window_detector.clear_history()
+                _LOGGER.info(
+                    "%s: Suppressing OWD for 5 minutes due to setpoint decrease",
+                    self.name
+                )
+
         await self._temperature_manager.async_set_temperature(temperature)
         self.async_write_ha_state()
 
@@ -1937,6 +2046,31 @@ class AdaptiveThermostat(ClimateEntity, RestoreEntity, ABC):
             self._previous_temp = self._current_temp
             self._current_temp = float(state.state)
             self._last_sensor_update = time.time()
+
+            # Feed temperature to open window detector if enabled
+            if self._open_window_detector:
+                now = datetime.now()
+                self._open_window_detector.record_temperature(now, self._current_temp)
+
+                # Check for temperature drop
+                if self._open_window_detector.check_for_drop(now=now):
+                    # Trigger detection and pause heating
+                    self._open_window_detector.trigger_detection(now)
+                    pause_duration_min = self._open_window_detector._pause_duration // 60
+                    _LOGGER.info(
+                        "%s: Open window detected - pausing for %d minutes",
+                        self.entity_id,
+                        pause_duration_min
+                    )
+
+                    # Emit ContactPauseEvent via cycle dispatcher
+                    self._cycle_dispatcher.emit(
+                        ContactPauseEvent(
+                            hvac_mode=str(self._hvac_mode.value) if self._hvac_mode else "off",
+                            timestamp=now,
+                            entity_id="open_window_detector",
+                        )
+                    )
         except ValueError as ex:
             _LOGGER.debug("%s: Unable to update from sensor %s: %s", self.entity_id,
                           self._sensor_entity_id, ex)
@@ -2054,6 +2188,34 @@ class AdaptiveThermostat(ClimateEntity, RestoreEntity, ABC):
                             coordinator.update_zone_demand(self._zone_id, False, self._hvac_mode.value if self._hvac_mode else None)
                     self.async_write_ha_state()
                     return
+
+            # Open window detection pause check (after contact sensor check)
+            if self._open_window_detector:
+                now = datetime.now()
+                if self._open_window_detector.should_pause(now):
+                    if self._pwm:
+                        await self._async_heater_turn_off(force=True)
+                    else:
+                        self._control_output = self._output_min
+                        await self._async_set_valve_value(self._control_output)
+                    # Update zone demand to False when paused
+                    if self._zone_id:
+                        coordinator = self.hass.data.get(const.DOMAIN, {}).get("coordinator")
+                        if coordinator:
+                            coordinator.update_zone_demand(self._zone_id, False, self._hvac_mode.value if self._hvac_mode else None)
+                    self.async_write_ha_state()
+                    return
+                elif self._open_window_detector.pause_just_expired():
+                    # Emit ContactResumeEvent when pause expires
+                    self._cycle_dispatcher.emit(
+                        ContactResumeEvent(
+                            hvac_mode=str(self._hvac_mode.value) if self._hvac_mode else "off",
+                            timestamp=now,
+                            entity_id="open_window_detector",
+                            pause_duration_seconds=self._open_window_detector._pause_duration,
+                        )
+                    )
+                    _LOGGER.info("%s: Open window pause expired - resuming normal control", self.entity_id)
 
             if self._sensor_stall != 0 and time.time() - self._last_sensor_update > \
                     self._sensor_stall:
