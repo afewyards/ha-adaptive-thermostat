@@ -1594,6 +1594,10 @@ class AdaptiveThermostat(ClimateEntity, RestoreEntity, ABC):
             # Reset PID calc timing to avoid stale dt when turned back on
             if self._control_output_manager is not None:
                 self._control_output_manager.reset_calc_timing()
+            # Reset OWD detector to clear history and pause state
+            if self._open_window_detector is not None:
+                _LOGGER.info("%s: Resetting OWD detector due to HVAC OFF", self.entity_id)
+                self._open_window_detector.reset()
         else:
             _LOGGER.error("%s: Unrecognized HVAC mode: %s", self.entity_id, hvac_mode)
             return
@@ -1636,6 +1640,18 @@ class AdaptiveThermostat(ClimateEntity, RestoreEntity, ABC):
         temperature = kwargs.get(ATTR_TEMPERATURE)
         if temperature is None:
             return
+
+        # Suppress OWD if setpoint is being lowered
+        if self._open_window_detector and self._target_temp is not None:
+            if temperature < self._target_temp:
+                now = datetime.now()
+                self._open_window_detector.suppress_detection(now, duration=300)
+                self._open_window_detector.clear_history()
+                _LOGGER.info(
+                    "%s: Suppressing OWD for 5 minutes due to setpoint decrease",
+                    self.name
+                )
+
         await self._temperature_manager.async_set_temperature(temperature)
         self.async_write_ha_state()
 
