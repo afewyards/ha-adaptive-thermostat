@@ -4,6 +4,7 @@ from datetime import datetime, timedelta
 from typing import Optional, Tuple
 
 from ..const import (
+    DEFAULT_OWD_ACTION,
     DEFAULT_OWD_COOLDOWN,
     DEFAULT_OWD_DETECTION_WINDOW,
     DEFAULT_OWD_PAUSE_DURATION,
@@ -24,6 +25,7 @@ class OpenWindowDetector:
         temp_drop: float = DEFAULT_OWD_TEMP_DROP,
         pause_duration: int = DEFAULT_OWD_PAUSE_DURATION,
         cooldown: int = DEFAULT_OWD_COOLDOWN,
+        action: str = DEFAULT_OWD_ACTION,
     ):
         """Initialize the open window detector.
 
@@ -36,11 +38,14 @@ class OpenWindowDetector:
                           Defaults to DEFAULT_OWD_PAUSE_DURATION (1800 seconds).
             cooldown: Cooldown duration in seconds to prevent rapid re-triggering.
                      Defaults to DEFAULT_OWD_COOLDOWN (2700 seconds).
+            action: Action to take when window is detected.
+                   Defaults to DEFAULT_OWD_ACTION.
         """
         self._detection_window = detection_window
         self._temp_drop = temp_drop
         self._pause_duration = pause_duration
         self._cooldown = cooldown
+        self._action = action
         self._temp_history: deque[Tuple[datetime, float]] = deque()
         self._detection_triggered = False
         self._pause_start_time: Optional[datetime] = None
@@ -194,3 +199,41 @@ class OpenWindowDetector:
             return False
 
         return now < self._suppressed_until
+
+    def clear_history(self) -> None:
+        """Clear temperature history ring buffer.
+
+        Clears the temperature history buffer without affecting pause state,
+        cooldown, or suppression. Useful when setpoint changes to prevent
+        false positives from natural temperature changes.
+        """
+        self._temp_history.clear()
+
+    def reset(self) -> None:
+        """Reset detector state except cooldown.
+
+        Clears temperature history, pause state, and suppression, but preserves
+        the cooldown (last_detection_time) to prevent rapid re-triggering.
+        Useful when HVAC mode changes to OFF or when resetting after a pause.
+        """
+        # Clear history
+        self._temp_history.clear()
+
+        # Reset pause state
+        self._detection_triggered = False
+        self._pause_start_time = None
+        self._pause_expired_flag = False
+        self._expiration_detected = False
+
+        # Clear suppression
+        self._suppressed_until = None
+
+        # Preserve _last_detection_time for cooldown anti-flapping
+
+    def get_action(self) -> str:
+        """Get the configured action type.
+
+        Returns:
+            The action string configured during initialization.
+        """
+        return self._action
