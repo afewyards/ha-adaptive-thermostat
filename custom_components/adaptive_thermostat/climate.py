@@ -2189,6 +2189,34 @@ class AdaptiveThermostat(ClimateEntity, RestoreEntity, ABC):
                     self.async_write_ha_state()
                     return
 
+            # Open window detection pause check (after contact sensor check)
+            if self._open_window_detector:
+                now = datetime.now()
+                if self._open_window_detector.should_pause(now):
+                    if self._pwm:
+                        await self._async_heater_turn_off(force=True)
+                    else:
+                        self._control_output = self._output_min
+                        await self._async_set_valve_value(self._control_output)
+                    # Update zone demand to False when paused
+                    if self._zone_id:
+                        coordinator = self.hass.data.get(const.DOMAIN, {}).get("coordinator")
+                        if coordinator:
+                            coordinator.update_zone_demand(self._zone_id, False, self._hvac_mode.value if self._hvac_mode else None)
+                    self.async_write_ha_state()
+                    return
+                elif self._open_window_detector.pause_just_expired():
+                    # Emit ContactResumeEvent when pause expires
+                    self._cycle_dispatcher.emit(
+                        ContactResumeEvent(
+                            hvac_mode=str(self._hvac_mode.value) if self._hvac_mode else "off",
+                            timestamp=now,
+                            entity_id="open_window_detector",
+                            pause_duration_seconds=self._open_window_detector._pause_duration,
+                        )
+                    )
+                    _LOGGER.info("%s: Open window pause expired - resuming normal control", self.entity_id)
+
             if self._sensor_stall != 0 and time.time() - self._last_sensor_update > \
                     self._sensor_stall:
                 # sensor not updated for too long, considered as stall, set to safety level
