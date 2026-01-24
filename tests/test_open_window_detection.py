@@ -2,6 +2,7 @@
 import pytest
 from datetime import datetime, timedelta
 from collections import deque
+from unittest.mock import Mock, MagicMock, AsyncMock, patch
 from custom_components.adaptive_thermostat.adaptive.open_window_detection import (
     OpenWindowDetector
 )
@@ -1007,3 +1008,218 @@ class TestOpenWindowDetectorResetClear:
 
         # But cooldown prevents immediate re-detection if turned back on quickly
         assert detector.in_cooldown(now + timedelta(seconds=60)) is True
+
+
+class TestOpenWindowDetectorNightSetbackSuppression:
+    """Test OWD suppression during night setback transitions."""
+
+    def test_night_setback_activation_suppresses_owd(self):
+        """Test that entering night setback suppresses OWD detection.
+
+        When night setback activates, the setpoint drops and temperature
+        starts to fall naturally. This should not trigger OWD detection.
+        OWD should be suppressed for approximately 5 minutes during transition.
+        """
+        detector = OpenWindowDetector()
+        now = datetime(2024, 1, 15, 22, 0, 0)  # Night setback start time
+
+        # Simulate night setback activation - suppress for 5 minutes (300 seconds)
+        detector.suppress_detection(now, duration=300)
+
+        # Verify suppression is active
+        assert detector.is_suppressed(now) is True
+
+        # Record temperature drop during transition (from 20°C to 18°C)
+        detector.record_temperature(now, 20.0)
+        detector.record_temperature(now + timedelta(seconds=60), 19.5)
+        detector.record_temperature(now + timedelta(seconds=120), 19.0)
+        detector.record_temperature(now + timedelta(seconds=180), 18.5)
+
+        # check_for_drop should return False even though drop >= 0.5°C (suppressed)
+        assert detector.check_for_drop(now + timedelta(seconds=180)) is False
+
+        # Suppression should last 5 minutes
+        assert detector.is_suppressed(now + timedelta(seconds=240)) is True
+        assert detector.is_suppressed(now + timedelta(seconds=299)) is True
+
+        # After 5 minutes, suppression expires
+        assert detector.is_suppressed(now + timedelta(seconds=301)) is False
+
+    def test_temp_drop_during_setback_transition_not_detected(self):
+        """Test no false positive during night setback temp adjustment.
+
+        When night setback activates and temperature drops naturally,
+        OWD should not be triggered even if the drop exceeds threshold.
+        """
+        detector = OpenWindowDetector()
+        now = datetime(2024, 1, 15, 22, 0, 0)  # Night setback activation
+
+        # Suppress detection during transition
+        detector.suppress_detection(now, duration=300)
+
+        # Build temperature history showing natural drop from 21°C to 19°C
+        # This is a 2°C drop over 3 minutes - well above 0.5°C threshold
+        detector.record_temperature(now, 21.0)
+        detector.record_temperature(now + timedelta(seconds=30), 20.7)
+        detector.record_temperature(now + timedelta(seconds=60), 20.4)
+        detector.record_temperature(now + timedelta(seconds=90), 20.1)
+        detector.record_temperature(now + timedelta(seconds=120), 19.8)
+        detector.record_temperature(now + timedelta(seconds=150), 19.5)
+        detector.record_temperature(now + timedelta(seconds=180), 19.0)
+
+        # Drop is 2°C > 0.5°C threshold, but suppression prevents detection
+        assert detector.check_for_drop(now + timedelta(seconds=180)) is False
+
+        # No detection should be triggered
+        assert detector._detection_triggered is False
+        assert detector._pause_start_time is None
+
+    def test_night_setback_deactivation_no_suppression(self):
+        """Test that ending night setback does NOT suppress OWD.
+
+        When night setback ends, temperature rises back to normal setpoint.
+        Temperature rise doesn't trigger OWD anyway (only drops trigger it),
+        so no suppression is needed.
+        """
+        detector = OpenWindowDetector()
+        now = datetime(2024, 1, 15, 6, 0, 0)  # Night setback end time
+
+        # No suppression on night setback deactivation
+        # (temperature will rise, which doesn't trigger OWD anyway)
+
+        # Record rising temperature from 18°C to 20°C
+        detector.record_temperature(now, 18.0)
+        detector.record_temperature(now + timedelta(seconds=60), 18.5)
+        detector.record_temperature(now + timedelta(seconds=120), 19.0)
+        detector.record_temperature(now + timedelta(seconds=180), 19.5)
+
+        # Rising temps don't trigger OWD (oldest - current = negative)
+        assert detector.check_for_drop(now + timedelta(seconds=180)) is False
+
+        # No suppression needed (and none should be active)
+        assert detector.is_suppressed(now) is False
+
+    def test_suppression_prevents_false_positive_during_setback_entry(self):
+        """Test suppression prevents false positives during night setback entry.
+
+        Comprehensive test of the full scenario:
+        1. Normal operation with stable temp
+        2. Night setback activates, suppression applied
+        3. Temperature drops naturally during transition
+        4. No OWD detection despite significant drop
+        5. After suppression expires, normal detection resumes
+        """
+        detector = OpenWindowDetector()
+        base_time = datetime(2024, 1, 15, 21, 50, 0)
+
+        # Step 1: Normal operation with stable temperature at 21°C
+        for i in range(6):
+            detector.record_temperature(base_time + timedelta(seconds=i * 30), 21.0)
+
+        # No drop detected - stable temp
+        assert detector.check_for_drop(base_time + timedelta(seconds=150)) is False
+
+        # Step 2: Night setback activates at 22:00
+        setback_start = datetime(2024, 1, 15, 22, 0, 0)
+        detector.suppress_detection(setback_start, duration=300)  # 5 min suppression
+
+        # Step 3: Temperature drops from 21°C to 18°C over next 3 minutes
+        # (2°C setback causes natural temperature drop)
+        temps = [21.0, 20.5, 20.0, 19.5, 19.0, 18.5, 18.0]
+        for i, temp in enumerate(temps):
+            detector.record_temperature(setback_start + timedelta(seconds=i * 30), temp)
+
+        # Step 4: Despite 3°C drop (well above 0.5°C threshold), no detection during suppression
+        check_time = setback_start + timedelta(seconds=180)
+        assert detector.check_for_drop(check_time) is False
+
+        # Verify suppression is still active at 4 minutes
+        assert detector.is_suppressed(setback_start + timedelta(seconds=240)) is True
+
+        # Step 5: After suppression expires, detection works normally
+        # Wait for suppression to expire (5+ minutes)
+        post_suppression_time = setback_start + timedelta(seconds=310)
+
+        # Clear history and add new readings to test normal detection
+        detector.clear_history()
+
+        # Simulate a real window opening after suppression expires
+        detector.record_temperature(post_suppression_time, 18.0)
+        detector.record_temperature(post_suppression_time + timedelta(seconds=60), 17.8)
+        detector.record_temperature(post_suppression_time + timedelta(seconds=120), 17.4)
+
+        # Now detection should work normally (0.6°C drop over 2 minutes)
+        assert detector.check_for_drop(post_suppression_time + timedelta(seconds=120)) is True
+
+    def test_suppression_duration_configurable_for_transitions(self):
+        """Test that suppression duration can be configured for different scenarios.
+
+        Different heating systems may need different suppression durations:
+        - Fast systems (forced air): shorter suppression (3 min)
+        - Slow systems (floor heating): longer suppression (10 min)
+        """
+        detector = OpenWindowDetector()
+        now = datetime(2024, 1, 15, 22, 0, 0)
+
+        # Test short suppression (3 minutes for fast systems)
+        detector.suppress_detection(now, duration=180)
+
+        # Active for 2.5 minutes
+        assert detector.is_suppressed(now + timedelta(seconds=150)) is True
+
+        # Expired after 3 minutes
+        assert detector.is_suppressed(now + timedelta(seconds=181)) is False
+
+        # Test longer suppression (10 minutes for slow systems)
+        detector2 = OpenWindowDetector()
+        detector2.suppress_detection(now, duration=600)
+
+        # Active for 8 minutes
+        assert detector2.is_suppressed(now + timedelta(seconds=480)) is True
+
+        # Expired after 10 minutes
+        assert detector2.is_suppressed(now + timedelta(seconds=601)) is False
+
+    def test_multiple_night_setback_transitions_in_one_day(self):
+        """Test OWD suppression across multiple night setback transitions.
+
+        Tests that suppression is correctly applied for each transition:
+        - Evening activation (22:00)
+        - Morning deactivation (6:00)
+        - Verifies independent suppression for each transition
+        """
+        detector = OpenWindowDetector()
+
+        # Evening transition: Night setback starts at 22:00
+        evening_start = datetime(2024, 1, 15, 22, 0, 0)
+        detector.suppress_detection(evening_start, duration=300)
+
+        # Record evening temp drop (20°C -> 18°C)
+        detector.record_temperature(evening_start, 20.0)
+        detector.record_temperature(evening_start + timedelta(seconds=120), 19.0)
+        detector.record_temperature(evening_start + timedelta(seconds=180), 18.5)
+
+        # Suppressed during evening transition
+        assert detector.is_suppressed(evening_start + timedelta(seconds=180)) is True
+        assert detector.check_for_drop(evening_start + timedelta(seconds=180)) is False
+
+        # Evening suppression expires after 5 minutes
+        assert detector.is_suppressed(evening_start + timedelta(seconds=301)) is False
+
+        # Morning transition: Night setback ends at 6:00
+        # (Temperature rises - no suppression needed, but test the independence)
+        morning_end = datetime(2024, 1, 16, 6, 0, 0)
+
+        # Clear previous state
+        detector.clear_history()
+
+        # Record morning temp rise (18°C -> 20°C)
+        detector.record_temperature(morning_end, 18.0)
+        detector.record_temperature(morning_end + timedelta(seconds=120), 19.0)
+        detector.record_temperature(morning_end + timedelta(seconds=180), 19.5)
+
+        # No suppression active (previous evening suppression long expired)
+        assert detector.is_suppressed(morning_end) is False
+
+        # Rising temp doesn't trigger OWD anyway
+        assert detector.check_for_drop(morning_end + timedelta(seconds=180)) is False
