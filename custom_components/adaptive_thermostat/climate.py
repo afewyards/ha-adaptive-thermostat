@@ -824,6 +824,7 @@ class AdaptiveThermostat(ClimateEntity, RestoreEntity, ABC):
                 window_orientation=self._window_orientation,
                 get_target_temp=lambda: self._target_temp,
                 get_current_temp=lambda: self._current_temp,
+                get_open_window_detector=lambda: self._open_window_detector,
             )
             _LOGGER.info(
                 "%s: Night setback controller initialized",
