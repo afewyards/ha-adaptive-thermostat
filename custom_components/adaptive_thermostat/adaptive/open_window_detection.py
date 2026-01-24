@@ -3,7 +3,11 @@ from collections import deque
 from datetime import datetime, timedelta
 from typing import Tuple
 
-from ..const import DEFAULT_OWD_DETECTION_WINDOW, DEFAULT_OWD_TEMP_DROP
+from ..const import (
+    DEFAULT_OWD_DETECTION_WINDOW,
+    DEFAULT_OWD_PAUSE_DURATION,
+    DEFAULT_OWD_TEMP_DROP,
+)
 
 
 class OpenWindowDetector:
@@ -17,6 +21,7 @@ class OpenWindowDetector:
         self,
         detection_window: int = DEFAULT_OWD_DETECTION_WINDOW,
         temp_drop: float = DEFAULT_OWD_TEMP_DROP,
+        pause_duration: int = DEFAULT_OWD_PAUSE_DURATION,
     ):
         """Initialize the open window detector.
 
@@ -25,10 +30,17 @@ class OpenWindowDetector:
                             Defaults to DEFAULT_OWD_DETECTION_WINDOW (180 seconds).
             temp_drop: Temperature drop threshold in °C to trigger open window detection.
                       Defaults to DEFAULT_OWD_TEMP_DROP (0.5°C).
+            pause_duration: Duration in seconds to pause heating after window detection.
+                          Defaults to DEFAULT_OWD_PAUSE_DURATION (1800 seconds).
         """
         self._detection_window = detection_window
         self._temp_drop = temp_drop
+        self._pause_duration = pause_duration
         self._temp_history: deque[Tuple[datetime, float]] = deque()
+        self._detection_triggered = False
+        self._pause_start_time: datetime | None = None
+        self._pause_expired_flag = False
+        self._expiration_detected = False
 
     def record_temperature(self, timestamp: datetime, temp: float) -> None:
         """Record a temperature reading and prune old entries.
@@ -73,3 +85,54 @@ class OpenWindowDetector:
 
         # Return True if drop meets or exceeds threshold
         return temp_drop >= self._temp_drop
+
+    def trigger_detection(self, now: datetime) -> None:
+        """Trigger open window detection and start pause period.
+
+        Args:
+            now: Current timestamp when detection was triggered.
+        """
+        self._detection_triggered = True
+        self._pause_start_time = now
+        self._pause_expired_flag = False
+        self._expiration_detected = False
+
+    def should_pause(self, now: datetime) -> bool:
+        """Check if heating should be paused due to open window detection.
+
+        Args:
+            now: Current timestamp to check against pause period.
+
+        Returns:
+            True if currently within pause period, False otherwise.
+        """
+        if not self._detection_triggered:
+            return False
+
+        if self._pause_start_time is None:
+            return False
+
+        pause_end_time = self._pause_start_time + timedelta(seconds=self._pause_duration)
+
+        if now <= pause_end_time:
+            return True
+
+        # Pause has expired - set flag on first detection of expiration
+        if not self._expiration_detected:
+            self._expiration_detected = True
+            self._pause_expired_flag = True
+        return False
+
+    def pause_just_expired(self) -> bool:
+        """Check if pause period just expired and reset the flag.
+
+        This method returns True only once when the pause expires, then False
+        on subsequent calls until the pause expires again.
+
+        Returns:
+            True if pause just expired (first call after expiration), False otherwise.
+        """
+        if self._pause_expired_flag:
+            self._pause_expired_flag = False
+            return True
+        return False
