@@ -422,6 +422,30 @@ CONF_CONTACT_ACTION = "contact_action"
 CONF_CONTACT_DELAY = "contact_delay"
 CONF_CONTACT_LEARNING_GRACE = "contact_learning_grace"
 
+# Open Window Detection (algorithmic) configuration
+CONF_OPEN_WINDOW_DETECTION = "open_window_detection"
+CONF_OWD_TEMP_DROP = "temp_drop"
+CONF_OWD_DETECTION_WINDOW = "detection_window"
+CONF_OWD_PAUSE_DURATION = "pause_duration"
+CONF_OWD_COOLDOWN = "cooldown"
+CONF_OWD_ACTION = "action"
+
+# Open Window Detection action types
+OWD_ACTION_PAUSE = "pause"
+OWD_ACTION_FROST = "frost_protection"
+
+VALID_OWD_ACTIONS = [
+    OWD_ACTION_PAUSE,
+    OWD_ACTION_FROST,
+]
+
+# Open Window Detection defaults
+DEFAULT_OWD_TEMP_DROP = 0.5  # 0.5°C drop
+DEFAULT_OWD_DETECTION_WINDOW = 180  # 3 minutes
+DEFAULT_OWD_PAUSE_DURATION = 1800  # 30 minutes
+DEFAULT_OWD_COOLDOWN = 2700  # 45 minutes
+DEFAULT_OWD_ACTION = OWD_ACTION_PAUSE
+
 # Night setback configuration
 CONF_NIGHT_SETBACK = "night_setback"
 CONF_NIGHT_SETBACK_ENABLED = "enabled"

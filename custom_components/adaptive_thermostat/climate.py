@@ -2029,6 +2029,31 @@ class AdaptiveThermostat(ClimateEntity, RestoreEntity, ABC):
             self._previous_temp = self._current_temp
             self._current_temp = float(state.state)
             self._last_sensor_update = time.time()
+
+            # Feed temperature to open window detector if enabled
+            if self._open_window_detector:
+                now = datetime.now()
+                self._open_window_detector.record_temperature(now, self._current_temp)
+
+                # Check for temperature drop
+                if self._open_window_detector.check_for_drop(now=now):
+                    # Trigger detection and pause heating
+                    self._open_window_detector.trigger_detection(now)
+                    pause_duration_min = self._open_window_detector._pause_duration // 60
+                    _LOGGER.info(
+                        "%s: Open window detected - pausing for %d minutes",
+                        self.entity_id,
+                        pause_duration_min
+                    )
+
+                    # Emit ContactPauseEvent via cycle dispatcher
+                    self._cycle_dispatcher.emit(
+                        ContactPauseEvent(
+                            hvac_mode=str(self._hvac_mode.value) if self._hvac_mode else "off",
+                            timestamp=now,
+                            entity_id="open_window_detector",
+                        )
+                    )
         except ValueError as ex:
             _LOGGER.debug("%s: Unable to update from sensor %s: %s", self.entity_id,
                           self._sensor_entity_id, ex)

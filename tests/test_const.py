@@ -8,6 +8,20 @@ from custom_components.adaptive_thermostat.const import (
     HEATING_TYPE_FORCED_AIR,
     VALID_HEATING_TYPES,
     INTEGRAL_DECAY_THRESHOLDS,
+    CONF_OPEN_WINDOW_DETECTION,
+    CONF_OWD_TEMP_DROP,
+    CONF_OWD_DETECTION_WINDOW,
+    CONF_OWD_PAUSE_DURATION,
+    CONF_OWD_COOLDOWN,
+    CONF_OWD_ACTION,
+    DEFAULT_OWD_TEMP_DROP,
+    DEFAULT_OWD_DETECTION_WINDOW,
+    DEFAULT_OWD_PAUSE_DURATION,
+    DEFAULT_OWD_COOLDOWN,
+    DEFAULT_OWD_ACTION,
+    OWD_ACTION_PAUSE,
+    OWD_ACTION_FROST,
+    VALID_OWD_ACTIONS,
 )
 
 
@@ -161,6 +175,95 @@ class TestIntegralDecayThresholds:
         assert floor < radiator
         assert radiator < convector
         assert convector < forced_air
+
+
+class TestOpenWindowDetectionConstants:
+    """Test Open Window Detection (OWD) configuration constants."""
+
+    def test_owd_config_constants_defined(self):
+        """Verify all OWD configuration constants are defined."""
+        # Configuration key constants
+        assert CONF_OPEN_WINDOW_DETECTION is not None
+        assert isinstance(CONF_OPEN_WINDOW_DETECTION, str)
+
+        assert CONF_OWD_TEMP_DROP is not None
+        assert isinstance(CONF_OWD_TEMP_DROP, str)
+
+        assert CONF_OWD_DETECTION_WINDOW is not None
+        assert isinstance(CONF_OWD_DETECTION_WINDOW, str)
+
+        assert CONF_OWD_PAUSE_DURATION is not None
+        assert isinstance(CONF_OWD_PAUSE_DURATION, str)
+
+        assert CONF_OWD_COOLDOWN is not None
+        assert isinstance(CONF_OWD_COOLDOWN, str)
+
+        assert CONF_OWD_ACTION is not None
+        assert isinstance(CONF_OWD_ACTION, str)
+
+    def test_owd_default_temp_drop(self):
+        """Test default temperature drop is 0.5°C."""
+        assert DEFAULT_OWD_TEMP_DROP == 0.5
+        assert isinstance(DEFAULT_OWD_TEMP_DROP, (int, float))
+        assert DEFAULT_OWD_TEMP_DROP > 0
+
+    def test_owd_default_detection_window(self):
+        """Test default detection window is 180 seconds (3 minutes)."""
+        assert DEFAULT_OWD_DETECTION_WINDOW == 180
+        assert isinstance(DEFAULT_OWD_DETECTION_WINDOW, int)
+        assert DEFAULT_OWD_DETECTION_WINDOW > 0
+
+    def test_owd_default_pause_duration(self):
+        """Test default pause duration is 1800 seconds (30 minutes)."""
+        assert DEFAULT_OWD_PAUSE_DURATION == 1800
+        assert isinstance(DEFAULT_OWD_PAUSE_DURATION, int)
+        assert DEFAULT_OWD_PAUSE_DURATION > 0
+
+    def test_owd_default_cooldown(self):
+        """Test default cooldown is 2700 seconds (45 minutes)."""
+        assert DEFAULT_OWD_COOLDOWN == 2700
+        assert isinstance(DEFAULT_OWD_COOLDOWN, int)
+        assert DEFAULT_OWD_COOLDOWN > 0
+
+    def test_owd_default_action(self):
+        """Test default action is 'pause'."""
+        assert DEFAULT_OWD_ACTION == "pause"
+        assert isinstance(DEFAULT_OWD_ACTION, str)
+
+    def test_owd_action_constants_defined(self):
+        """Verify OWD action type constants are defined."""
+        assert OWD_ACTION_PAUSE is not None
+        assert isinstance(OWD_ACTION_PAUSE, str)
+        assert OWD_ACTION_PAUSE == "pause"
+
+        assert OWD_ACTION_FROST is not None
+        assert isinstance(OWD_ACTION_FROST, str)
+        assert OWD_ACTION_FROST == "frost_protection"
+
+    def test_valid_owd_actions(self):
+        """Test VALID_OWD_ACTIONS list contains expected actions."""
+        assert VALID_OWD_ACTIONS is not None
+        assert isinstance(VALID_OWD_ACTIONS, list)
+        assert len(VALID_OWD_ACTIONS) == 2
+        assert "pause" in VALID_OWD_ACTIONS
+        assert "frost_protection" in VALID_OWD_ACTIONS
+
+    def test_default_action_is_valid(self):
+        """Test that the default action is in the valid actions list."""
+        assert DEFAULT_OWD_ACTION in VALID_OWD_ACTIONS
+
+    def test_owd_timing_relationships(self):
+        """Test logical relationships between timing constants.
+
+        - Detection window should be shorter than pause duration
+        - Cooldown should be longer than detection window
+        """
+        assert DEFAULT_OWD_DETECTION_WINDOW < DEFAULT_OWD_PAUSE_DURATION, (
+            "Detection window should be shorter than pause duration"
+        )
+        assert DEFAULT_OWD_COOLDOWN > DEFAULT_OWD_DETECTION_WINDOW, (
+            "Cooldown should be longer than detection window"
+        )
 
 
 # Marker test
