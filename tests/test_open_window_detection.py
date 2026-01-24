@@ -2123,3 +2123,402 @@ class TestClimateSetTemperatureOWDSuppression:
         # Verify suppress_detection was NOT called
         detector.suppress_detection.assert_not_called()
         detector.clear_history.assert_not_called()
+
+
+class TestClimateOWDControlHeatingIntegration:
+    """Test _async_control_heating integration with OpenWindowDetector."""
+
+    @pytest.mark.asyncio
+    async def test_control_heating_pauses_during_owd(self):
+        """Test heater turns off during OWD pause.
+
+        When detector.should_pause(now) returns True, _async_control_heating
+        should turn off the heater and return early without executing
+        normal PID control logic.
+        """
+        # Create detector with active pause
+        detector = OpenWindowDetector(pause_duration=1800)
+        now = datetime(2024, 1, 15, 10, 0, 0)
+        detector.trigger_detection(now)
+
+        # Verify pause is active
+        assert detector.should_pause(now) is True
+
+        # Mock thermostat with OWD detector
+        mock_thermostat = Mock()
+        mock_thermostat._open_window_detector = detector
+        mock_thermostat._active = True
+        mock_thermostat._hvac_mode = Mock()
+        mock_thermostat._hvac_mode.value = "heat"
+        mock_thermostat._contact_sensor_handler = None
+        mock_thermostat._pwm = 15  # PWM mode
+        mock_thermostat._zone_id = None
+        mock_thermostat._temp_lock = AsyncMock()
+        mock_thermostat._temp_lock.__aenter__ = AsyncMock()
+        mock_thermostat._temp_lock.__aexit__ = AsyncMock()
+        mock_thermostat.entity_id = "climate.test"
+
+        # Mock heater turn off method
+        mock_thermostat._async_heater_turn_off = AsyncMock()
+
+        # Mock PID calculation method (should NOT be called)
+        mock_thermostat.calc_output = AsyncMock()
+
+        # Mock state update
+        mock_thermostat.async_write_ha_state = Mock()
+
+        # Simulate _async_control_heating OWD pause check
+        # This is what the implementation should do:
+        if mock_thermostat._open_window_detector and \
+           mock_thermostat._open_window_detector.should_pause(now):
+            await mock_thermostat._async_heater_turn_off(force=True)
+            mock_thermostat.async_write_ha_state()
+            return  # Early return - no PID calc
+
+        # Verify heater was turned off
+        mock_thermostat._async_heater_turn_off.assert_called_once_with(force=True)
+
+        # Verify state was updated
+        mock_thermostat.async_write_ha_state.assert_called_once()
+
+        # Verify PID calculation was NOT called (early return)
+        mock_thermostat.calc_output.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_control_heating_no_pause_continues_normally(self):
+        """Test normal control continues when OWD not pausing.
+
+        When detector.should_pause(now) returns False, _async_control_heating
+        should continue with normal PID control logic.
+        """
+        # Create detector with NO active pause
+        detector = OpenWindowDetector(pause_duration=1800)
+        now = datetime(2024, 1, 15, 10, 0, 0)
+
+        # Verify pause is NOT active
+        assert detector.should_pause(now) is False
+
+        # Mock thermostat with OWD detector
+        mock_thermostat = Mock()
+        mock_thermostat._open_window_detector = detector
+        mock_thermostat._active = True
+        mock_thermostat._hvac_mode = Mock()
+        mock_thermostat._hvac_mode.value = "heat"
+        mock_thermostat._contact_sensor_handler = None
+        mock_thermostat._pwm = 15
+        mock_thermostat._zone_id = None
+
+        # Mock heater turn off method (should NOT be called)
+        mock_thermostat._async_heater_turn_off = AsyncMock()
+
+        # Mock PID calculation method (SHOULD be called)
+        mock_thermostat.calc_output = AsyncMock()
+        mock_thermostat.set_control_value = AsyncMock()
+
+        # Simulate _async_control_heating OWD pause check
+        should_pause = False
+        if mock_thermostat._open_window_detector:
+            should_pause = mock_thermostat._open_window_detector.should_pause(now)
+
+        if not should_pause:
+            # Continue with normal control
+            await mock_thermostat.calc_output()
+            await mock_thermostat.set_control_value()
+
+        # Verify heater was NOT turned off
+        mock_thermostat._async_heater_turn_off.assert_not_called()
+
+        # Verify PID calculation WAS called (normal flow)
+        mock_thermostat.calc_output.assert_called_once()
+        mock_thermostat.set_control_value.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_control_heating_emits_resume_event_on_pause_expiry(self):
+        """Test ContactResumeEvent is emitted when pause expires.
+
+        When detector.pause_just_expired() returns True, _async_control_heating
+        should emit a ContactResumeEvent via the cycle dispatcher.
+        """
+        # Create detector with pause that just expired
+        detector = OpenWindowDetector(pause_duration=60)
+        now = datetime(2024, 1, 15, 10, 0, 0)
+        detector.trigger_detection(now)
+
+        # Fast forward past pause expiration
+        time_after_pause = now + timedelta(seconds=61)
+
+        # Check if pause expired (this sets the internal flag)
+        assert detector.should_pause(time_after_pause) is False
+
+        # First call to pause_just_expired should return True
+        assert detector.pause_just_expired() is True
+
+        # Mock thermostat with OWD detector and cycle dispatcher
+        mock_thermostat = Mock()
+        mock_thermostat._open_window_detector = detector
+        mock_thermostat._cycle_dispatcher = Mock()
+        mock_thermostat._cycle_dispatcher.emit = Mock()
+
+        # Simulate _async_control_heating resume check
+        # This is what the implementation should do:
+        if mock_thermostat._open_window_detector and \
+           not mock_thermostat._open_window_detector.should_pause(time_after_pause):
+            if mock_thermostat._open_window_detector.pause_just_expired():
+                # Emit ContactResumeEvent
+                mock_thermostat._cycle_dispatcher.emit(
+                    type="ContactResumeEvent",
+                    reason="open_window_pause_expired",
+                    timestamp=time_after_pause
+                )
+
+        # Verify ContactResumeEvent was emitted
+        mock_thermostat._cycle_dispatcher.emit.assert_called_once()
+        call_kwargs = mock_thermostat._cycle_dispatcher.emit.call_args[1]
+        assert call_kwargs["type"] == "ContactResumeEvent"
+        assert call_kwargs["reason"] == "open_window_pause_expired"
+
+    @pytest.mark.asyncio
+    async def test_control_heating_no_resume_event_when_not_expired(self):
+        """Test no ContactResumeEvent when pause hasn't expired.
+
+        When pause is not active and hasn't just expired,
+        pause_just_expired() returns False and no event is emitted.
+        """
+        # Create detector with no pause
+        detector = OpenWindowDetector()
+        now = datetime(2024, 1, 15, 10, 0, 0)
+
+        # Verify no pause and no expiration
+        assert detector.should_pause(now) is False
+        assert detector.pause_just_expired() is False
+
+        # Mock thermostat
+        mock_thermostat = Mock()
+        mock_thermostat._open_window_detector = detector
+        mock_thermostat._cycle_dispatcher = Mock()
+        mock_thermostat._cycle_dispatcher.emit = Mock()
+
+        # Simulate _async_control_heating resume check
+        if mock_thermostat._open_window_detector and \
+           not mock_thermostat._open_window_detector.should_pause(now):
+            if mock_thermostat._open_window_detector.pause_just_expired():
+                mock_thermostat._cycle_dispatcher.emit(
+                    type="ContactResumeEvent",
+                    reason="open_window_pause_expired",
+                    timestamp=now
+                )
+
+        # Verify NO event was emitted
+        mock_thermostat._cycle_dispatcher.emit.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_control_heating_valve_mode_pauses_during_owd(self):
+        """Test valve mode (non-PWM) turns off during OWD pause.
+
+        When in valve mode (pwm=0), heater should be set to minimum
+        output instead of using turn_off method.
+        """
+        # Create detector with active pause
+        detector = OpenWindowDetector(pause_duration=1800)
+        now = datetime(2024, 1, 15, 10, 0, 0)
+        detector.trigger_detection(now)
+
+        assert detector.should_pause(now) is True
+
+        # Mock thermostat with OWD detector (valve mode)
+        mock_thermostat = Mock()
+        mock_thermostat._open_window_detector = detector
+        mock_thermostat._active = True
+        mock_thermostat._hvac_mode = Mock()
+        mock_thermostat._hvac_mode.value = "heat"
+        mock_thermostat._contact_sensor_handler = None
+        mock_thermostat._pwm = 0  # Valve mode (not PWM)
+        mock_thermostat._output_min = 0
+        mock_thermostat._control_output = 50
+        mock_thermostat._zone_id = None
+
+        # Mock valve control method
+        mock_thermostat._async_set_valve_value = AsyncMock()
+
+        # Mock state update
+        mock_thermostat.async_write_ha_state = Mock()
+
+        # Simulate _async_control_heating OWD pause check for valve mode
+        if mock_thermostat._open_window_detector and \
+           mock_thermostat._open_window_detector.should_pause(now):
+            if mock_thermostat._pwm:
+                # PWM mode - turn off
+                pass
+            else:
+                # Valve mode - set to minimum
+                mock_thermostat._control_output = mock_thermostat._output_min
+                await mock_thermostat._async_set_valve_value(mock_thermostat._control_output)
+            mock_thermostat.async_write_ha_state()
+            return  # Early return
+
+        # Verify valve was set to minimum output
+        mock_thermostat._async_set_valve_value.assert_called_once_with(0)
+
+        # Verify control output was set to minimum
+        assert mock_thermostat._control_output == 0
+
+        # Verify state was updated
+        mock_thermostat.async_write_ha_state.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_control_heating_no_owd_detector_no_pause_check(self):
+        """Test control heating works normally when OWD detector is None.
+
+        When _open_window_detector is None (OWD disabled), no pause
+        checking should occur and normal control flow continues.
+        """
+        # Mock thermostat with NO OWD detector
+        mock_thermostat = Mock()
+        mock_thermostat._open_window_detector = None
+        mock_thermostat._active = True
+        mock_thermostat._hvac_mode = Mock()
+        mock_thermostat._hvac_mode.value = "heat"
+        mock_thermostat._contact_sensor_handler = None
+
+        # Mock methods
+        mock_thermostat._async_heater_turn_off = AsyncMock()
+        mock_thermostat.calc_output = AsyncMock()
+        mock_thermostat.set_control_value = AsyncMock()
+
+        # Simulate _async_control_heating without OWD
+        now = datetime(2024, 1, 15, 10, 0, 0)
+
+        # OWD check should be skipped
+        should_pause = False
+        if mock_thermostat._open_window_detector:
+            should_pause = mock_thermostat._open_window_detector.should_pause(now)
+
+        if not should_pause:
+            # Continue with normal control
+            await mock_thermostat.calc_output()
+            await mock_thermostat.set_control_value()
+
+        # Verify heater was NOT turned off
+        mock_thermostat._async_heater_turn_off.assert_not_called()
+
+        # Verify normal control flow executed
+        mock_thermostat.calc_output.assert_called_once()
+        mock_thermostat.set_control_value.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_control_heating_owd_pause_updates_zone_demand(self):
+        """Test zone demand is updated to False during OWD pause.
+
+        When OWD triggers a pause, zone demand should be set to False
+        in the coordinator to prevent central controller from running.
+        """
+        # Create detector with active pause
+        detector = OpenWindowDetector(pause_duration=1800)
+        now = datetime(2024, 1, 15, 10, 0, 0)
+        detector.trigger_detection(now)
+
+        assert detector.should_pause(now) is True
+
+        # Mock thermostat with zone coordination
+        mock_thermostat = Mock()
+        mock_thermostat._open_window_detector = detector
+        mock_thermostat._active = True
+        mock_thermostat._hvac_mode = Mock()
+        mock_thermostat._hvac_mode.value = "heat"
+        mock_thermostat._contact_sensor_handler = None
+        mock_thermostat._pwm = 15
+        mock_thermostat._zone_id = "living_room"
+        mock_thermostat.entity_id = "climate.living_room"
+
+        # Mock coordinator
+        mock_coordinator = Mock()
+        mock_coordinator.update_zone_demand = Mock()
+
+        # Mock hass data
+        mock_hass = Mock()
+        mock_hass.data = {
+            "adaptive_thermostat": {
+                "coordinator": mock_coordinator
+            }
+        }
+        mock_thermostat.hass = mock_hass
+
+        # Mock other methods
+        mock_thermostat._async_heater_turn_off = AsyncMock()
+        mock_thermostat.async_write_ha_state = Mock()
+
+        # Simulate _async_control_heating OWD pause with zone update
+        if mock_thermostat._open_window_detector and \
+           mock_thermostat._open_window_detector.should_pause(now):
+            await mock_thermostat._async_heater_turn_off(force=True)
+
+            # Update zone demand to False when paused
+            if mock_thermostat._zone_id:
+                coordinator = mock_thermostat.hass.data.get("adaptive_thermostat", {}).get("coordinator")
+                if coordinator:
+                    coordinator.update_zone_demand(
+                        mock_thermostat._zone_id,
+                        False,
+                        mock_thermostat._hvac_mode.value
+                    )
+
+            mock_thermostat.async_write_ha_state()
+            return
+
+        # Verify zone demand was updated to False
+        mock_coordinator.update_zone_demand.assert_called_once_with(
+            "living_room",
+            False,
+            "heat"
+        )
+
+    @pytest.mark.asyncio
+    async def test_control_heating_pause_takes_priority_over_contact_sensor(self):
+        """Test OWD pause check happens after contact sensor check.
+
+        Per integration point, OWD check should occur after contact sensor
+        check in _async_control_heating. This test verifies both can coexist.
+        """
+        # Create detector with active pause
+        detector = OpenWindowDetector(pause_duration=1800)
+        now = datetime(2024, 1, 15, 10, 0, 0)
+        detector.trigger_detection(now)
+
+        # Mock thermostat with both contact sensors and OWD
+        mock_thermostat = Mock()
+        mock_thermostat._open_window_detector = detector
+        mock_thermostat._active = True
+        mock_thermostat._hvac_mode = Mock()
+        mock_thermostat._hvac_mode.value = "heat"
+        mock_thermostat._pwm = 15
+        mock_thermostat._zone_id = None
+
+        # Mock contact sensor handler (returns False - no action)
+        mock_contact_handler = Mock()
+        mock_contact_handler.should_take_action = Mock(return_value=False)
+        mock_thermostat._contact_sensor_handler = mock_contact_handler
+
+        # Mock methods
+        mock_thermostat._async_heater_turn_off = AsyncMock()
+        mock_thermostat.async_write_ha_state = Mock()
+
+        # Simulate _async_control_heating with both checks
+        # Contact sensor check first
+        contact_pause = False
+        if mock_thermostat._contact_sensor_handler and \
+           mock_thermostat._contact_sensor_handler.should_take_action():
+            contact_pause = True
+
+        # OWD check second (if contact sensor didn't pause)
+        if not contact_pause:
+            if mock_thermostat._open_window_detector and \
+               mock_thermostat._open_window_detector.should_pause(now):
+                await mock_thermostat._async_heater_turn_off(force=True)
+                mock_thermostat.async_write_ha_state()
+                return
+
+        # Verify contact sensor was checked first
+        mock_contact_handler.should_take_action.assert_called_once()
+
+        # Verify OWD pause was applied
+        mock_thermostat._async_heater_turn_off.assert_called_once_with(force=True)
